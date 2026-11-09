@@ -14,9 +14,13 @@ yfinance fuer alle anderen -- yfinance braucht keinen Key). Demo-Daten
 
 from __future__ import annotations
 
+import csv
 import logging
 import math
 import os
+import sqlite3
+from datetime import date, timedelta
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -1360,6 +1364,456 @@ def page_import() -> None:
                         st.dataframe(pd.DataFrame(errors_u), width="stretch", hide_index=True)
 
 
+# --- Seite 5: Watchlist Live ---------------------------------------------------
+# (v53; alles ab hier liegt im app_part2-Bereich ab def _formula_block -- Split-Regel)
+
+LIVE_TIMING_TAGS = {"positiv": "[POS]", "neutral": "[NEU]", "negativ": "[NEG]"}
+
+LIVE_TABLE_COLS = ["ticker", "name", "korb", "status_screener", "status_live", "kurs",
+                   "mos_live_min", "mos_live_robust", "kaufzone_kurs", "distanz_pct",
+                   "timing_status", "smart_money_score", "urteil", "divergenz_stufe",
+                   "alarm", "wert_veraltet", "naechster_earnings"]
+
+# Export-Spalten (ASCII-Namen fuer watchlist_live_export.csv / Drive)
+LIVE_EXPORT_COLS = [("ticker", "TICKER"), ("name", "NAME"), ("korb", "KORB"),
+                    ("status_screener", "STATUS_SCREENER"), ("status_live", "STATUS_LIVE"),
+                    ("kurs", "KURS"), ("mos_live_min", "MOS_LIVE_MIN"),
+                    ("mos_live_robust", "MOS_LIVE_ROBUST"), ("kaufzone_kurs", "KAUFZONE_KURS"),
+                    ("distanz_pct", "DISTANZ_PCT"), ("timing_status", "TIMING_STATUS"),
+                    ("smart_money_score", "SM_SCORE"), ("urteil", "URTEIL"),
+                    ("divergenz_stufe", "DIVERGENZ_STUFE"), ("alarm", "ALARM"),
+                    ("wert_veraltet", "WERT_VERALTET"), ("naechster_earnings", "NAECHSTER_EARNINGS")]
+
+
+def _live_db_path() -> Path:
+    """DB-Pfad der Live-Seite: Session-State (Tests) > Umgebungsvariable > Default."""
+    return Path(st.session_state.get("db_path")
+                or os.environ.get("VALUE_TRACKER_DB")
+                or "value_tracker.db")
+
+
+def _ascii(s) -> str:
+    """ASCII-Variante fuer Drive/Export: Umlaute -> ae/oe/ue/ss (als Escapes, damit
+    der Quelltext selbst ASCII bleibt), Rest -> '?'."""
+    return (str(s)
+            .replace("\u00e4", "ae").replace("\u00f6", "oe").replace("\u00fc", "ue").replace("\u00df", "ss")
+            .replace("\u00c4", "Ae").replace("\u00d6", "Oe").replace("\u00dc", "Ue")
+            .encode("ascii", "replace").decode("ascii"))
+
+
+def live_export_csv(rows: list[dict]) -> bytes:
+    """Export der Live-Tabelle als CSV-Bytes, ASCII-Spaltennamen + ASCII-Inhalt."""
+    import io
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow([ascii_name for _key, ascii_name in LIVE_EXPORT_COLS])
+    for r in rows:
+        w.writerow([_ascii(r.get(key, "")) for key, _ascii_name in LIVE_EXPORT_COLS])
+    return buf.getvalue().encode("ascii", "replace")
+
+
+def filter_live_rows(rows: list[dict], koerbe: list[str] | None = None,
+                     statuses: list[str] | None = None, alarm_only: bool = False) -> list[dict]:
+    """Filter der Live-Tabelle (Korb/Status/Alarm) -- reine Funktion, ohne UI testbar."""
+    out = list(rows)
+    if koerbe:
+        out = [r for r in out if r.get("korb") in koerbe]
+    if statuses:
+        out = [r for r in out if r.get("status_live") in statuses]
+    if alarm_only:
+        out = [r for r in out if r.get("alarm")]
+    return out
+
+
+def sort_live_rows(rows: list[dict], key: str, ascending: bool = True) -> list[dict]:
+    """Sortieren der Live-Tabelle nach Spalte `key` (numerisch wenn moeglich)."""
+    def _k(r):
+        v = r.get(key)
+        try:
+            return (0, float(v))
+        except (TypeError, ValueError):
+            return (1, str(v))
+    return sorted(rows, key=_k, reverse=not ascending)
+
+
+def load_live_overview(db_path: Path, cfg: dict, heute: date) -> dict:
+    """Liest value_tracker.db fuer Seite 5: watchlist_status + neuster valuations-Stand
+    + letzter Kurs (prices) + Korb (decisions) + 13F-Periode je Fonds + Smart Money
+    (Funktionen aus smart_money.py -- keine Doppelimplementierung).
+
+    Rueckgabe: {"error": str|None, "rows": [...], "kurs_stand", "valuation_stand",
+    "fonds_13f": [...], "stale": {"kurs","valuation","13f"}}.
+    Fehlende DB oder fehlende Pflicht-Tabellen -> error-Meldung statt Exception."""
+    out = {"error": None, "rows": [], "kurs_stand": None, "valuation_stand": None,
+           "fonds_13f": [], "stale": {"kurs": False, "valuation": False, "13f": False}}
+    if not db_path.exists():
+        out["error"] = (f"Keine Datenbank gefunden: {db_path} -- zuerst live_update.py / "
+                        f"decisions.py init ausfuehren (value_tracker.db).")
+        return out
+    con = sqlite3.connect(db_path)
+    con.row_factory = sqlite3.Row
+    try:
+        tables = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        missing = {"watchlist_status", "valuations", "prices"} - tables
+        if missing:
+            out["error"] = (f"Datenbank {db_path} unvollstaendig -- fehlende Tabellen: "
+                            f"{', '.join(sorted(missing))}. Schema anlegen mit "
+                            f"`python decisions.py init` (schema.sql).")
+            return out
+
+        wcfg = cfg.get("watchlist", {})
+        kurs_tage = int(wcfg.get("kurs_veraltet_tage", 3))
+        val_tage = int(wcfg.get("wert_veraltet_tage", 100))
+        try:
+            import smart_money as sm
+            sm_max_age = int(sm.PLAUSIBILITY_MAX_AGE_TAGE)
+        except Exception:
+            sm = None
+            sm_max_age = 140
+
+        # Datenstand
+        r = con.execute("SELECT MAX(datum) AS d FROM prices").fetchone()
+        if r and r["d"]:
+            out["kurs_stand"] = {"datum": r["d"], "alter_tage": (heute - date.fromisoformat(r["d"][:10])).days}
+            out["stale"]["kurs"] = out["kurs_stand"]["alter_tage"] > kurs_tage
+        r = con.execute("SELECT MAX(calc_date) AS d FROM valuations").fetchone()
+        if r and r["d"]:
+            out["valuation_stand"] = {"datum": r["d"], "alter_tage": (heute - date.fromisoformat(r["d"][:10])).days}
+            out["stale"]["valuation"] = out["valuation_stand"]["alter_tage"] > val_tage
+
+        # 13F-Periode je Fonds (neueste Periode) + Alter
+        fonds_rows = [dict(x) for x in con.execute(
+            "SELECT fonds, periode, report_date FROM smart_money_positions")] if "smart_money_positions" in tables else []
+        newest: dict[str, dict] = {}
+        for fr in fonds_rows:
+            f = fr["fonds"]
+            if f not in newest or (fr["periode"] or "") > (newest[f]["periode"] or ""):
+                newest[f] = fr
+        for f, fr in sorted(newest.items()):
+            rd = (fr.get("report_date") or "")[:10]
+            try:
+                alter = (heute - date.fromisoformat(rd)).days if rd else None
+            except ValueError:
+                alter = None
+            out["fonds_13f"].append({"fonds": f, "periode": fr["periode"],
+                                     "report_date": rd, "alter_tage": alter})
+            if alter is not None and alter > sm_max_age:
+                out["stale"]["13f"] = True
+
+        # Zeilen: watchlist_status LEFT valuations (neuester Stand) + letzter Kurs + Korb
+        wl = {x["ticker"]: dict(x) for x in con.execute("SELECT * FROM watchlist_status")}
+        val = {}
+        for x in con.execute(
+                """SELECT v.* FROM valuations v
+                   JOIN (SELECT ticker, MAX(calc_date) AS cd FROM valuations GROUP BY ticker) m
+                     ON v.ticker=m.ticker AND v.calc_date=m.cd"""):
+            val[x["ticker"]] = dict(x)
+        last_price = {}
+        for x in con.execute(
+                """SELECT p.ticker, p.kurs, p.datum FROM prices p
+                   JOIN (SELECT ticker, MAX(datum) AS d FROM prices GROUP BY ticker) m
+                     ON p.ticker=m.ticker AND p.datum=m.d"""):
+            last_price[x["ticker"]] = dict(x)
+        # neuster Korb je Ticker (SQLite: bare columns stammen bei MAX(datum) aus der Max-Zeile)
+        korb_map = {x[0]: x[1] for x in con.execute(
+            "SELECT ticker, korb, MAX(datum) FROM decisions WHERE korb<>'' GROUP BY ticker"
+        )} if "decisions" in tables else {}
+
+        session_rows = st.session_state.get("rows") or []
+        names = {(r.get("ticker") or "").upper(): (r.get("name") or "") for r in session_rows}
+
+        for t in sorted(set(wl) | set(val)):
+            w = wl.get(t, {})
+            v = val.get(t, {})
+            lp = last_price.get(t, {})
+            kurs = w.get("kurs")
+            if kurs is None:
+                kurs = lp.get("kurs")
+            status = w.get("status_screener") or v.get("status") or ""
+            quality = v.get("quality")
+            mos_min_v = v.get("mos_min")
+            timing_raw = w.get("timing_status") or ""
+            row = {
+                "ticker": t,
+                "name": names.get(t, t),
+                "korb": korb_map.get(t, ""),
+                "status_screener": status,
+                "status_live": w.get("status_live") or "",
+                "kurs": kurs,
+                "kurs_datum": lp.get("datum") or w.get("updated_at") or "",
+                "mos_live_min": w.get("mos_live_min"),
+                "mos_live_robust": w.get("mos_live_robust"),
+                "kaufzone_kurs": w.get("kaufzone_kurs"),
+                "distanz_pct": w.get("distanz_pct"),
+                "timing_status": LIVE_TIMING_TAGS.get(timing_raw, timing_raw or "n/a"),
+                "alarm": w.get("alarm") or 0,
+                "wert_veraltet": w.get("wert_veraltet") or 0,
+                "naechster_earnings": v.get("naechster_earnings") or "",
+                "quality": quality,
+                "mos_min": mos_min_v,
+                "mos_robust": v.get("mos_robust"),
+                "iv_bear": v.get("iv_bear"), "iv_base": v.get("iv_base"), "iv_bull": v.get("iv_bull"),
+                "iv_avg3": v.get("iv_avg3"), "iv_latest": v.get("iv_latest"),
+                "iv_ttm": v.get("iv_ttm"), "iv_ttm_only": v.get("iv_ttm_only"),
+                "iv_base_10pct": v.get("iv_base_10pct"),
+                "calc_date": v.get("calc_date") or "",
+                "smart_money_score": None, "urteil": "n/a", "divergenz_stufe": "-",
+            }
+            if sm is not None:
+                try:
+                    smd = sm.smart_money_score(t, cfg, db_path=db_path, heute=heute)
+                    row["smart_money_score"] = smd["score"]
+                    row["urteil"] = sm.urteil({"status_all": status, "quality": quality,
+                                               "mos_rule": mos_min_v}, smd, cfg)
+                    row["divergenz_stufe"] = sm.divergenz_stufe(
+                        {"status_all": status, "quality": quality, "mos_rule": mos_min_v}, smd, cfg)
+                except Exception as exc:
+                    logger.warning("smart_money fuer %s nicht verfuegbar: %s", t, exc)
+            out["rows"].append(row)
+        return out
+    finally:
+        con.close()
+
+
+@st.cache_data(ttl=900, show_spinner=False)   # 15 Minuten Cache
+def _load_live_cached(db_path_str: str, heute_str: str) -> dict:
+    return load_live_overview(Path(db_path_str), CFG, date.fromisoformat(heute_str))
+
+
+def _live_header(overview: dict, cfg: dict) -> None:
+    """Kopfzeile Seite 5: Datenstand (Kurs, Valuation, 13F je Fonds mit Alter) +
+    Warnung bei veralteten Daten (Kurs > kurs_veraltet_tage, Valuation >
+    wert_veraltet_tage, 13F > PLAUSIBILITY_MAX_AGE_TAGE)."""
+    import smart_money as sm
+    wcfg = cfg.get("watchlist", {})
+    st.subheader("Datenstand")
+    ks = overview.get("kurs_stand")
+    vs = overview.get("valuation_stand")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Letzter Kurs", ks["datum"] if ks else "-",
+              f"{ks['alter_tage']} Tage alt" if ks else "n/a")
+    c2.metric("Letzte Bewertung", vs["datum"] if vs else "-",
+              f"{vs['alter_tage']} Tage alt" if vs else "n/a")
+    with c3:
+        st.metric("13F-Perioden", len(overview.get("fonds_13f") or []))
+        for f in overview.get("fonds_13f") or []:
+            alt_txt = f"{f['alter_tage']} Tage alt" if f["alter_tage"] is not None else "Datum unbekannt"
+            st.caption(f"{f['fonds']}: {f['periode']} (report {f['report_date'] or '-'}, {alt_txt})")
+    stale = overview.get("stale") or {}
+    warns = []
+    if stale.get("kurs"):
+        warns.append(f"Kurs veraltet (> {wcfg.get('kurs_veraltet_tage', 3)} Tage)")
+    if stale.get("valuation"):
+        warns.append(f"Bewertung veraltet (> {wcfg.get('wert_veraltet_tage', 100)} Tage)")
+    if stale.get("13f"):
+        warns.append(f"13F veraltet (> {sm.PLAUSIBILITY_MAX_AGE_TAGE} Tage)")
+    if warns:
+        st.warning("[!] Veraltete Daten: " + "; ".join(warns))
+
+
+def watchlist_detail(ticker: str, db_path: Path, cfg: dict, heute: date) -> None:
+    """Detailbereich je Ticker: Szenario-Tabelle (Bear/Base/Bull je Startwert-Modus
+    mit Erwartungswert), Kurs-vs-Kaufzone-Chart (1 Jahr, Altair), Smart-Money-Block,
+    Entscheidungslog, Platzhalter Trends."""
+    import decisions as dec_mod
+    import smart_money as sm
+    con = sqlite3.connect(db_path)
+    con.row_factory = sqlite3.Row
+    v = con.execute(
+        """SELECT * FROM valuations WHERE ticker=? ORDER BY calc_date DESC LIMIT 1""",
+        (ticker,)).fetchone()
+    v = dict(v) if v else {}
+    w = con.execute("SELECT * FROM watchlist_status WHERE ticker=?", (ticker,)).fetchone()
+    w = dict(w) if w else {}
+    kurs = w.get("kurs") or v.get("kurs")
+
+    st.subheader(f"Detail: {ticker}")
+    # --- Szenario-Tabelle je Startwert-Modus + Erwartungswert (decisions.erwartungswert_pct)
+    gew = dec_mod._default_gewichte(cfg)
+    sc_rows = []
+    for m in ("avg3", "latest", "ttm", "ttm_only"):
+        ivb = v.get(f"iv_{m}")
+        mos = (1.0 - kurs / ivb) if (ivb and kurs and ivb > 0) else float("nan")
+        sc_rows.append({"Startwert-Modus": m, "IV Base": ivb, "MoS live (Base)": mos})
+    ew = dec_mod.erwartungswert_pct(v.get("iv_bear"), v.get("iv_base"), v.get("iv_bull"),
+                                    kurs if kurs else float("nan"), gew)
+    sc_rows.append({"Startwert-Modus": "(aktiv: bear/base/bull)",
+                    "IV Base": v.get("iv_base"),
+                    "MoS live (Base)": (1.0 - kurs / v["iv_base"]) if v.get("iv_base") and kurs and v["iv_base"] > 0 else float("nan")})
+    df_sc = pd.DataFrame(sc_rows)
+    e1, e2 = st.columns(2)
+    with e1:
+        st.markdown("**Szenarien je Startwert-Modus** (IV Base + MoS live)")
+        st.dataframe(df_sc, hide_index=True, width="stretch")
+        st.caption(f"IV Bear {v.get('iv_bear')} | IV Bull {v.get('iv_bull')} | Kurs {kurs}")
+    with e2:
+        st.metric("Erwartungswert (p*100)", f"{ew:.1f} %" if ew == ew else "n/a",
+                  f"p = {ew / 100.0:.2f}" if ew == ew else "n/a")
+        st.caption("p = Summe Gewichte der Szenarien mit IV >= 1,10 x Kurs "
+                   "(Rendite >= +10 % in 12 M); Gewichte 25/50/25")
+
+    # --- Kurs-vs-Kaufzone-Chart (1 Jahr, Altair)
+    hist = [dict(r) for r in con.execute(
+        "SELECT datum, kurs FROM prices WHERE ticker=? AND datum>=? ORDER BY datum",
+        (ticker, (heute - timedelta(days=365)).isoformat()))]
+    if hist:
+        df_p = pd.DataFrame(hist)
+        df_p["datum"] = pd.to_datetime(df_p["datum"])
+        line = alt.Chart(df_p).mark_line().encode(x="datum:T", y="kurs:Q")
+        kaufzone = w.get("kaufzone_kurs")
+        layers = [line]
+        if kaufzone:
+            layers.append(alt.Chart(pd.DataFrame({"kaufzone": [kaufzone]})).mark_rule(
+                color="red", strokeDash=[5, 5]).encode(y="kaufzone:Q"))
+        st.altair_chart(alt.layer(*layers).properties(height=280, title=f"Kurs 1 Jahr vs. Kaufzone {ticker}"),
+                        width="stretch")
+
+    # --- Smart-Money-Block (Positionen je Fonds, Katalysatoren, Rationale mit Quelle)
+    st.markdown("**Smart Money**")
+    try:
+        sm_con = sm.connect(db_path)
+        pos = sm._rows_for(sm_con, ticker)
+        if pos:
+            df_pos = pd.DataFrame([{k: r.get(k) for k in
+                                    ("fonds", "periode", "aktion", "aenderung_pct",
+                                     "anteil_portfolio", "wert", "filing_datum")} for r in pos])
+            st.dataframe(df_pos, hide_index=True, width="stretch")
+        else:
+            st.caption("Keine Fonds-Positionen in der DB.")
+        kat = sm.katalysatoren(sm_con, ticker)
+        if kat:
+            st.dataframe(pd.DataFrame(kat), hide_index=True, width="stretch")
+        rat = [dict(r) for r in sm_con.execute(
+            "SELECT datum, fonds, text, quelle_url, typ FROM smart_money_rationale "
+            "WHERE ticker=? ORDER BY datum DESC", (ticker.upper(),))]
+        for r in rat:
+            st.caption(f"Rationale ({r.get('typ') or 'Sonstiges'}, {r.get('datum') or '-'}): "
+                       f"{r.get('text') or ''} -- Quelle: {r.get('quelle_url') or '-'}")
+        sm_con.close()
+    except Exception as exc:
+        st.caption(f"Smart Money nicht verfuegbar: {exc}")
+
+    # --- Entscheidungslog (letzte Eintraege)
+    st.markdown("**Entscheidungslog (letzte Eintraege)**")
+    if "decisions" in {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}:
+        dec_rows = [dict(r) for r in con.execute(
+            "SELECT datum, aktion, korb, kurs, kurs_nachher, rendite_pct, ereignis_e, brier, thesis "
+            "FROM decisions WHERE ticker=? ORDER BY datum DESC, id DESC LIMIT 10",
+            (ticker,))]
+        if dec_rows:
+            st.dataframe(pd.DataFrame(dec_rows), hide_index=True, width="stretch")
+        else:
+            st.caption("Keine Eintraege im Entscheidungslog.")
+    con.close()
+    st.info("Trends (folgt) -- Platzhalter fuer kuenftige Trend-Indikatoren.")
+
+
+def _run_live_update(db_path: Path) -> None:
+    """Schaltflaeche 'Live aktualisieren': ruft live_update.py als Subprozess auf
+    (Netz), mit Fortschrittsanzeige und Fehlerlog. Ohne Netz bleibt der letzte Stand
+    in der DB (Cache wird danach geleert und die Seite neu geladen)."""
+    import subprocess
+    import sys
+    import tempfile
+    rows = st.session_state.get("rows") or []
+    if not rows:
+        st.warning("Keine Screener-Zeilen geladen -- Seite 1 (Rangliste) zuerst laufen lassen, "
+                   "damit ein Ranking fuer live_update.py vorliegt.")
+        return
+    cols = [c for c in ("ticker", "name", "status", "quality", "kurs", "kurs_datum", "calc_date",
+                        "iv_bear", "iv_base", "iv_bull", "iv_avg3", "iv_latest", "iv_ttm",
+                        "iv_ttm_only", "iv_base_10pct", "mos_min", "mos_robust", "naechster_earnings")
+            if c in rows[0]]
+    tmp = Path(tempfile.mkdtemp()) / "ranking_live.csv"
+    with open(tmp, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        for r in rows:
+            w.writerow({c: ("" if r.get(c) is None else r.get(c)) for c in cols})
+    prog = st.progress(0.0, text="live_update.py laeuft (Netz: Kurse abrufen) ...")
+    proc = subprocess.Popen(
+        [sys.executable, "live_update.py", "--ranking", str(tmp), "--db", str(db_path)],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    lines: list[str] = []
+    for line in proc.stdout:
+        lines.append(line)
+        prog.progress(min(0.99, len(lines) / 200.0), text=line.strip()[:100])
+    proc.wait()
+    prog.progress(1.0, text="Fertig")
+    out = "".join(lines)
+    if proc.returncode != 0:
+        st.error(f"live_update.py abgebrochen (Exit {proc.returncode}) -- letzter Stand bleibt.")
+    else:
+        st.success("Live-Update fertig -- Datenbank aktualisiert (watchlist_status, prices).")
+    with st.expander("Ausgabe / Fehlerlog live_update.py"):
+        st.code(out[-4000:] or "(keine Ausgabe)")
+    st.cache_data.clear()
+    st.rerun()
+
+
+def page_watchlist_live() -> None:
+    """Seite 5: Watchlist Live -- Kopfzeile Datenstand, filter/sortierbare Tabelle,
+    Detail je Ticker, Live-Update-Schaltflaeche, Export watchlist_live_export.csv."""
+    st.header(":material/visibility: Watchlist Live")
+    st.caption("Datenstand aus value_tracker.db (watchlist_status, valuations, prices, "
+               "decisions, smart_money_*) -- Anzeige ohne Netz; Cache 15 Minuten.")
+    db_path = _live_db_path()
+    heute = date.today()
+    overview = _load_live_cached(str(db_path), heute.isoformat())
+    if overview.get("error"):
+        st.info(overview["error"])
+        return
+    if not overview["rows"]:
+        st.info("Noch keine Live-Daten in der Datenbank -- 'Live aktualisieren' (Netz) "
+                "oder `python live_update.py --ranking <ranking.csv>` ausfuehren.")
+        if st.button("Live aktualisieren (Netz)"):
+            _run_live_update(db_path)
+        return
+
+    _live_header(overview, CFG)
+
+    rows = overview["rows"]
+    koerbe = sorted({r["korb"] for r in rows if r.get("korb")})
+    statuses = sorted({r["status_live"] for r in rows if r.get("status_live")})
+    fc1, fc2, fc3, fc4 = st.columns(4)
+    with fc1:
+        sel_koerbe = st.multiselect("Korb", koerbe, default=koerbe)
+    with fc2:
+        sel_status = st.multiselect("Status live", statuses, default=statuses)
+    with fc3:
+        alarm_only = st.checkbox("nur Alarm", value=False)
+    with fc4:
+        sort_key = st.selectbox("Sortieren nach", LIVE_TABLE_COLS, index=0)
+        ascending = st.checkbox("aufsteigend", value=False)
+
+    filtered = filter_live_rows(rows, sel_koerbe, sel_status, alarm_only)
+    filtered = sort_live_rows(filtered, sort_key, ascending)
+    df = pd.DataFrame(filtered, columns=LIVE_TABLE_COLS)
+    st.dataframe(df, hide_index=True, width="stretch", column_config={
+        "kurs": st.column_config.NumberColumn(format="%.2f"),
+        "mos_live_min": st.column_config.NumberColumn(format="%.1%%"),
+        "mos_live_robust": st.column_config.NumberColumn(format="%.1%%"),
+        "kaufzone_kurs": st.column_config.NumberColumn(format="%.2f"),
+        "distanz_pct": st.column_config.NumberColumn(format="%.1%%"),
+    })
+    st.download_button("Export watchlist_live_export.csv (ASCII)",
+                       data=live_export_csv(filtered),
+                       file_name="watchlist_live_export.csv",
+                       mime="text/csv")
+
+    st.divider()
+    st.subheader("Detail je Ticker")
+    ticker = st.selectbox("Ticker", [r["ticker"] for r in filtered] or ["-"])
+    if ticker and ticker != "-":
+        watchlist_detail(ticker, db_path, CFG, heute)
+
+    st.divider()
+    if st.button(":material/refresh: Live aktualisieren (Netz: live_update.py)"):
+        _run_live_update(db_path)
+
+
 # --- App ---------------------------------------------------------------------
 
 def main() -> None:
@@ -1380,7 +1834,9 @@ def main() -> None:
     page_scorecard_fn = st.Page(page_scorecard, title="Scorecard", icon=":material/table_view:")
     page_matrix_fn = st.Page(page_matrix, title="Matrix", icon=":material/scatter_plot:")
     page_import_fn = st.Page(page_import, title="Import", icon=":material/upload_file:")
-    nav = st.navigation([page_ranking_fn, page_scorecard_fn, page_matrix_fn, page_import_fn])
+    page_live_fn = st.Page(page_watchlist_live, title="Watchlist Live", icon=":material/visibility:")
+    nav = st.navigation([page_ranking_fn, page_scorecard_fn, page_matrix_fn, page_import_fn,
+                         page_live_fn])
     nav.run()
 
 
