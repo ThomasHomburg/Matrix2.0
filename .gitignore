@@ -1,0 +1,11 @@
+.env
+__pycache__/
+.pytest_cache/
+*.db
+*.sqlite
+.venv/
+.universe_cache.json
+tickers_stoxx600.csv
+.ranking_cache.json
+ranking_*.csv
+smart_money_overlap.csv
