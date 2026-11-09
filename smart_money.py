@@ -133,6 +133,7 @@ import sys
 import time
 import urllib.request
 import xml.etree.ElementTree as ET
+from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
 
@@ -639,7 +640,18 @@ def _parse_infotable(xml_bytes: bytes) -> tuple[list[dict], list[dict]]:
         cusip = _t(it, "cusip")
         name = _t(it, "nameOfIssuer")
         pc = _t(it, "putCall").upper()
-        shares_txt = _t(it, "shrsOrPrnAmt").split()[0] if _t(it, "shrsOrPrnAmt") else ""
+        # echtes EDGAR-Format: <shrsOrPrnAmt><sshPrnamt>11609000</sshPrnamt>...</shrsOrPrnAmt>
+        # (sshPrnamt verschachtelt -- das direkte .text von shrsOrPrnAmt ist leer, das
+        # alte Nur-Direkttext-Lesen lieferte NaN und damit in compare_quarters ein
+        # falsches "neu" je gehaltener Position). Fallback: flaches Fixture-Format
+        # "<shrsOrPrnAmt>123 sh</shrsOrPrnAmt>".
+        nested = ""
+        for el2 in it.iter():
+            if el2.tag.split("}")[-1] == "sshPrnamt" and el2.text:
+                nested = el2.text.strip()
+                break
+        flat_txt = _t(it, "shrsOrPrnAmt")
+        shares_txt = (nested or flat_txt.split()[0]) if (nested or flat_txt) else ""
         try:
             shares = float(shares_txt.replace(",", ""))
         except ValueError:
@@ -919,14 +931,29 @@ def merge_tickers(ticker: str, cfg: dict) -> str:
     return str(m.get(str(ticker).upper(), ticker)).upper()
 
 
-def compare_quarters(prev: dict[str, dict], cur: dict[str, dict]) -> list[dict]:
-    """Vorquartals-Vergleich (cusip -> holding): aktion + aenderung_pct."""
+def compare_quarters(prev: dict[str, dict], cur: dict[str, dict],
+                     vorquartal_bekannt: bool = True) -> list[dict]:
+    """Vorquartals-Vergleich: aktion + aenderung_pct. Der Vergleich laeuft ueber den
+    CUSIP (stabil gegen Mapping-Luecken: war der CUSIP im Vorquartal nicht gemappt,
+    ist dessen Schluessel der rohe CUSIP -- der Lookup findet die Position ueber den
+    CUSIP trotzdem, kein falsches "neu"; Diagnose v51: Berkshire "neu" bei DVA/MCO).
+    "neu" nur wenn das Vorquartal geladen ist (vorquartal_bekannt=True) UND der CUSIP
+    dort fehlt; fehlt das Vorquartals-Filing (Luecke) oder sind die Vorquartals-shares
+    nicht lesbar, ist die Aktion "unbekannt" -- nicht "neu"."""
+    prev_by_cusip: dict[str, dict] = {}
+    for k, r in prev.items():
+        prev_by_cusip.setdefault(r.get("cusip") or k, r)
+    cur_cusips = {h.get("cusip") or k for k, h in cur.items()}
     rows = []
-    for cusip, h in cur.items():
-        p = prev.get(cusip)
+    for key, h in cur.items():
+        cusip = h.get("cusip") or key
+        p = prev.get(key) or prev_by_cusip.get(cusip)
         ps = p.get("shares", float("nan")) if p else float("nan")
-        if p is None or ps != ps or ps <= 0:
-            aktion, aend = "neu", float("nan")
+        if p is None:
+            # CUSIP im Vorquartal nicht vorhanden: "neu" nur bei geladenem Vorquartal
+            aktion, aend = ("neu" if vorquartal_bekannt else "unbekannt"), float("nan")
+        elif ps != ps or ps <= 0:
+            aktion, aend = "unbekannt", float("nan")  # Vorquartals-shares nicht lesbar
         elif h["shares"] > ps:
             aktion, aend = "erhoeht", h["shares"] / ps - 1.0
         elif h["shares"] < ps:
@@ -937,9 +964,10 @@ def compare_quarters(prev: dict[str, dict], cur: dict[str, dict]) -> list[dict]:
         rows.append({"cusip": h.get("cusip") or cusip, "aktion": aktion, "aenderung_pct": aend,
                      "shares": h["shares"], "wert": h.get("value", h.get("wert", float("nan"))),
                      "name": h.get("name", ""), "title": h.get("title", "")})
-    for cusip, p in prev.items():
-        if cusip not in cur:
-            rows.append({"cusip": p.get("cusip") or cusip, "aktion": "verkauft", "aenderung_pct": -1.0,
+    for key, p in prev.items():
+        cusip = p.get("cusip") or key
+        if key not in cur and cusip not in cur_cusips:
+            rows.append({"cusip": cusip, "aktion": "verkauft", "aenderung_pct": -1.0,
                          "shares": 0.0, "wert": 0.0, "name": p.get("name", ""),
                          "title": p.get("title", "")})
     return rows
@@ -1386,8 +1414,12 @@ def fetch_all(cfg: dict, quarters: int | None = None, db_path: Path = DB_PATH,
                                    names=all_names, title_map=title_map)
             prev: dict[str, dict] = {}
             prev_total = None
+            # Perioden, die dieser Lauf geladen hat -- fehlt das Vorquartal eines
+            # Quartals darin (fehlendes Filing), ist die Aktion "unbekannt" statt "neu"
+            geladen = {quartal_of(rd or fd) for rd, fd, _a, _h, _o in qdata}
             for report_date, filing_date, accession, holdings, options in qdata:
                 q = quartal_of(report_date)  # Periode = Jahr-Qn exklusiv aus reportDate
+                vorquartal_bekannt = (not q) or (periode_add(q, -1) in geladen)
                 # nach Ticker mergen (GOOGL->GOOG): shares + wert summieren
                 by_ticker: dict[str, dict] = {}
                 for h in holdings:
@@ -1401,7 +1433,7 @@ def fetch_all(cfg: dict, quarters: int | None = None, db_path: Path = DB_PATH,
                         by_ticker[t] = {"cusip": h["cusip"], "name": h["name"],
                                         "shares": h["shares"], "value": h["value"],
                                         "title": h.get("title", "")}
-                rows = compare_quarters(prev, by_ticker)
+                rows = compare_quarters(prev, by_ticker, vorquartal_bekannt=vorquartal_bekannt)
                 if not prev:
                     # aelteste geladene Periode je Fonds -> aktion "basis" (nie "neu");
                     # neu/erhoeht/reduziert/verkauft erst ab vorhandenem Vorquartal
@@ -1487,14 +1519,18 @@ def rationale_quelle(con: sqlite3.Connection, ticker: str) -> str:
     return ((r[0] or "")[:40]) if r else ""
 
 
-def score4_kandidaten(con: sqlite3.Connection, cfg: dict) -> list[dict]:
+def score4_kandidaten(con: sqlite3.Connection, cfg: dict,
+                      heute: date | None = None) -> list[dict]:
     """(Ticker, Fonds)-Kombinationen, die aktuell fuer Score 4 in Frage kommen --
     Score-3-Bedingung (config smart_money.rules) in den letzten ZWEI aufeinanderfolgenden
     Quartalen, aus der DB gelesen. Fonds = Kaeufer (neu/erhoeht, Gewicht > 0) des
-    neuesten Quartals. Rueckgabe: Zeilen fuer die Import-Vorlage (text/quelle_url leer)."""
+    neuesten Quartals. Rueckgabe: Zeilen fuer die Import-Vorlage (text/quelle_url leer).
+    Aktionen aelter als rules.aktion_max_alter_tage zaehlen nicht (wie im Score)."""
+    heute = heute or date.today()
     rules = cfg.get("smart_money", {}).get("rules", {})
     gew_min = float(rules.get("gewicht_summe_min", 2.0))
     anteil_g1_min = float(rules.get("anteil_gewicht1_min", 0.05))
+    max_alter = int(rules.get("aktion_max_alter_tage", 200))
     tickers = [r[0] for r in con.execute(
         "SELECT DISTINCT ticker FROM smart_money_positions WHERE ticker IS NOT NULL ORDER BY ticker")]
     out: list[dict] = []
@@ -1506,7 +1542,10 @@ def score4_kandidaten(con: sqlite3.Connection, cfg: dict) -> list[dict]:
         last_q, prev_q = quarters[-1], quarters[-2]
 
         def _cond3(q: str) -> tuple[set, bool]:
-            last = [r for r in rows if r["periode"] == q and r["aktion"] != "basis"]
+            last = [r for r in rows if r["periode"] == q
+                    and r["aktion"] not in ("basis", "unbekannt")]
+            last = [r for r in last
+                    if (a := _row_alter_tage(r, heute)) is None or a <= max_alter]
             kaeufer = {r["fonds"] for r in last
                        if r["aktion"] in ("neu", "erhoeht") and _fonds_gewicht(cfg, r["fonds"]) > 0}
             gew = sum(_fonds_gewicht(cfg, f) for f in kaeufer)
@@ -1546,9 +1585,21 @@ def katalysatoren(con: sqlite3.Connection, ticker: str) -> list[dict]:
         "WHERE ticker=? ORDER BY datum DESC", (ticker.upper(),))]
 
 
+def _row_alter_tage(r: dict, heute: date) -> int | None:
+    """Alter einer Positions-Zeile in Tagen (heute - filing_datum); None wenn
+    kein Datum vorliegt (dann zaehlt die Aktion -- Alter unbekannt)."""
+    fd = (r.get("filing_datum") or "")[:10]
+    try:
+        return (heute - date.fromisoformat(fd)).days if fd else None
+    except ValueError:
+        return None
+
+
 def smart_money_score(ticker: str, cfg: dict, db_path: Path = DB_PATH,
                       heute: date | None = None) -> dict:
-    """Score 1..4 + Zusatzfelder (config smart_money.rules)."""
+    """Score 1..4 + Zusatzfelder (config smart_money.rules). Aktionen aelter als
+    rules.aktion_max_alter_tage zaehlen nicht fuer Score/Urteil (bleiben aber in
+    letzte_aktion/CSV; Alter siehe aktion_alter_tage)."""
     rules = cfg.get("smart_money", {}).get("rules", {})
     ein_max = float(rules.get("ein_fonds_anteil_max", 0.02))
     gew_min = float(rules.get("gewicht_summe_min", 2.0))
@@ -1556,6 +1607,7 @@ def smart_money_score(ticker: str, cfg: dict, db_path: Path = DB_PATH,
     zwei_q = bool(rules.get("zwei_quartale", True))
     verk_schw = float(rules.get("verkauf_schwelle", 0.30))
     min_score = int(rules.get("verkauf_min_score", 1))
+    max_alter = int(rules.get("aktion_max_alter_tage", 200))
     heute = heute or date.today()
 
     con = connect(db_path)
@@ -1571,26 +1623,35 @@ def smart_money_score(ticker: str, cfg: dict, db_path: Path = DB_PATH,
     if is_etf_ticker(con, ticker, cfg):
         return {"score": 1, "fonds_kaeufer": [], "fonds_verkaeufer": [],
                 "letzte_aktion": "", "filing_datum": filing_datum,
-                "daten_alter_tage": daten_alter, "rationale_vorhanden": False,
+                "daten_alter_tage": daten_alter, "aktion_alter_tage": daten_alter,
+                "letzte_periode": "", "signal_hinweis": "",
+                "rationale_vorhanden": False,
                 "rationale_quelle": "", "katalysator_13d": ""}
     empty = {"score": 1, "fonds_kaeufer": [], "fonds_verkaeufer": [],
              "letzte_aktion": "", "filing_datum": "", "daten_alter_tage": None,
+             "aktion_alter_tage": None, "letzte_periode": "", "signal_hinweis": "",
              "rationale_vorhanden": False, "rationale_quelle": "", "katalysator_13d": ""}
     if not rows:
         return empty
 
     quarters = sorted({r["periode"] for r in rows})
     last_q = quarters[-1]
-    last = [r for r in rows if r["periode"] == last_q and r["aktion"] != "basis"]  # basis ignorieren
+    # basis + unbekannt ignorieren (kein vergleichbarer Vorquartals-Bezug)
+    last = [r for r in rows if r["periode"] == last_q
+            and r["aktion"] not in ("basis", "unbekannt")]
+    # Alter-Schwelle: zu alte Aktionen zaehlen nicht fuer Score/Urteil
+    last_aktiv = [r for r in last
+                  if (a := _row_alter_tage(r, heute)) is None or a <= max_alter]
 
     def _gew(fonds: str) -> float:
         return _fonds_gewicht(cfg, fonds)
 
     # Kaeufer/Verkaeufer im letzten Quartal (nur Gewicht > 0 zaehlt im Score;
-    # Aktivisten (gewicht 0) erscheinen nur als Katalysator)
-    kaeufer = sorted({r["fonds"] for r in last
+    # Aktivisten (gewicht 0) erscheinen nur als Katalysator); zu alte Aktionen
+    # (aktion_max_alter_tage) zaehlen nicht -- letzte_aktion listet sie weiter
+    kaeufer = sorted({r["fonds"] for r in last_aktiv
                       if r["aktion"] in ("neu", "erhoeht") and _gew(r["fonds"]) > 0})
-    verkaeufer = sorted({r["fonds"] for r in last
+    verkaeufer = sorted({r["fonds"] for r in last_aktiv
                          if r["aktion"] in ("verkauft", "reduziert")
                          and (r["aenderung_pct"] is None or r["aenderung_pct"] <= -verk_schw)})
     letzte_aktion = "; ".join(f"{r['fonds']}:{r['aktion']}" for r in last)
@@ -1601,11 +1662,11 @@ def smart_money_score(ticker: str, cfg: dict, db_path: Path = DB_PATH,
 
     # Score-Basis
     gew_summe = sum(_gew(f) for f in kaeufer)
-    _g1 = [r["anteil_portfolio"] or 0.0 for r in last
+    _g1 = [r["anteil_portfolio"] or 0.0 for r in last_aktiv
            if r["fonds"] in kaeufer and _gew(r["fonds"]) == 1.0]
     max_anteil_g1 = max(_g1) if _g1 else 0.0
     cond3 = (gew_summe >= gew_min) or (max_anteil_g1 >= anteil_g1_min)
-    _anteile = [r["anteil_portfolio"] or 0.0 for r in last if r["fonds"] in kaeufer]
+    _anteile = [r["anteil_portfolio"] or 0.0 for r in last_aktiv if r["fonds"] in kaeufer]
     if not kaeufer:
         score = 1
     elif len(kaeufer) == 1 and (max(_anteile) if _anteile else 0.0) < ein_max and not cond3:
@@ -1617,7 +1678,10 @@ def smart_money_score(ticker: str, cfg: dict, db_path: Path = DB_PATH,
     # Score 4: cond3 in zwei aufeinanderfolgenden Quartalen + Rationale
     if zwei_q and rat and score >= 3 and len(quarters) >= 2:
         prev_q = quarters[-2]
-        prev = [r for r in rows if r["periode"] == prev_q and r["aktion"] != "basis"]  # v49
+        prev = [r for r in rows if r["periode"] == prev_q
+                and r["aktion"] not in ("basis", "unbekannt")]
+        prev = [r for r in prev
+                if (a := _row_alter_tage(r, heute)) is None or a <= max_alter]
         prev_kaeufer = {r["fonds"] for r in prev
                         if r["aktion"] in ("neu", "erhoeht") and _gew(r["fonds"]) > 0}
         prev_gew = sum(_gew(f) for f in prev_kaeufer)
@@ -1627,9 +1691,16 @@ def smart_money_score(ticker: str, cfg: dict, db_path: Path = DB_PATH,
         if (prev_gew >= gew_min or prev_anteil_g1 >= anteil_g1_min):
             score = 4
     score = max(min_score, score - len(verkaeufer))
+    # signal_hinweis: compact summary of the newest signal, e.g.
+    # "13F 2026-Q2, 87 Tage alt, 3 Fonds" (Fonds = aktiv zaehlende im letzten Quartal)
+    n_fonds = len({r["fonds"] for r in last_aktiv})
+    alt_txt = f"{daten_alter} Tage alt" if daten_alter is not None else "Alter unbekannt"
+    hinweis = f"13F {last_q}, {alt_txt}, {n_fonds} Fonds" if last_q else ""
     return {"score": score, "fonds_kaeufer": kaeufer, "fonds_verkaeufer": verkaeufer,
             "letzte_aktion": letzte_aktion, "filing_datum": filing_datum,
-            "daten_alter_tage": daten_alter, "rationale_vorhanden": rat,
+            "daten_alter_tage": daten_alter, "aktion_alter_tage": daten_alter,
+            "letzte_periode": last_q, "signal_hinweis": hinweis,
+            "rationale_vorhanden": rat,
             "rationale_quelle": rat_quelle, "katalysator_13d": kat_str}
 
 
@@ -1651,13 +1722,20 @@ def _f(row: dict, *keys: str) -> float:
     return float("nan")
 
 
-def urteil(row: dict, sm: dict) -> str:
-    """smart_money_urteil: Bestaetigung / Divergenz / Warnung / neutral."""
+def urteil(row: dict, sm: dict, cfg: dict | None = None) -> str:
+    """smart_money_urteil: Bestaetigung / Divergenz / Warnung / gemischt / neutral.
+    Kaufen UND Verkaufen durch Fonds mit Gewicht > 0 im selben Quartal -> "gemischt"
+    (v51; ohne cfg zaehlt jeder Verkaeufer als Gewicht > 0)."""
     status = (row.get("status_all") or row.get("status") or "").strip()
     mos_min = _f(row, "mos_rule", "mos_min", "margin_of_safety")
     kauft = bool(sm["fonds_kaeufer"])
-    verkauft = bool(sm["fonds_verkaeufer"])
+    if cfg is not None:
+        verkauft = any(_fonds_gewicht(cfg, f) > 0 for f in sm["fonds_verkaeufer"])
+    else:
+        verkauft = bool(sm["fonds_verkaeufer"])
     pos = status in STATUS_POS
+    if kauft and verkauft:
+        return "gemischt"
     if kauft and pos:
         return "Bestaetigung"
     if verkauft and status == "nein":
@@ -1667,6 +1745,30 @@ def urteil(row: dict, sm: dict) -> str:
     if verkauft and pos:
         return "Warnung"
     return "neutral"
+
+
+def divergenz_stufe(row: dict, sm: dict, cfg: dict) -> str:
+    """Stufe der Divergenz (config smart_money.rules.divergenz; CSV-Spalte
+    divergenz_stufe: stark|schwach|-). "-" ohne Divergenz; "stark" nur wenn
+    (Score >= stark_score_min ODER (Score >= schwach_score_min UND Quality >=
+    schwach_quality_min)) UND MoS-Minimum > mos_min_grenze (z. B. -100 %);
+    sonst "schwach"."""
+    if urteil(row, sm, cfg) != "Divergenz":
+        return "-"
+    dv = cfg.get("smart_money", {}).get("rules", {}).get("divergenz", {})
+    stark_score_min = int(dv.get("stark_score_min", 3))
+    schwach_score_min = int(dv.get("schwach_score_min", 2))
+    schwach_quality_min = float(dv.get("schwach_quality_min", 60))
+    mos_grenze = float(dv.get("mos_min_grenze", -1.0))
+    score = int(sm.get("score", 1))
+    quality = _f(row, "quality")
+    mos_min = _f(row, "mos_rule", "mos_min", "margin_of_safety")
+    cond = (score >= stark_score_min
+            or (score >= schwach_score_min and quality == quality
+                and quality >= schwach_quality_min))
+    if cond and mos_min == mos_min and mos_min > mos_grenze:
+        return "stark"
+    return "schwach"
 
 
 def load_ranking_csv(path: str) -> list[dict]:
@@ -1713,7 +1815,7 @@ def overlap(ranking_csv: str, watch_csv: str | None, cfg: dict,
     out = []
     for t in tickers:
         row = by_t.get(t, {"ticker": t, "status_all": "", "quality": "", "mos_rule": ""})
-        sm = smart_money_score(t, cfg, db_path=db_path)
+        sm = smart_money_score(t, cfg, db_path=db_path, heute=heute)
         # ETF/Index-Zeile bleibt in der CSV (Abdeckung nachvollziehbar), aber
         # mit Score 1, Urteil neutral und Flag etf=ja (neue Spalte am Ende)
         etf_flag = is_etf_ticker(con, t, cfg)
@@ -1730,10 +1832,14 @@ def overlap(ranking_csv: str, watch_csv: str | None, cfg: dict,
             "daten_alter_tage": sm["daten_alter_tage"] if sm["daten_alter_tage"] is not None else "",
             "katalysator_13d": sm["katalysator_13d"],
             "rationale_vorhanden": "ja" if sm["rationale_vorhanden"] else "nein",
-            "smart_money_urteil": "neutral" if etf_flag else urteil(row, sm),
+            "smart_money_urteil": "neutral" if etf_flag else urteil(row, sm, cfg),
             "etf": "ja" if etf_flag else "",
             # Quelle (erste 40 Zeichen der quelle_url) bei rationale_vorhanden=ja, neue Spalte am Ende
             "rationale_quelle": sm.get("rationale_quelle", "") if sm["rationale_vorhanden"] else "",
+            # v51 Signalqualitaet: Alter der Aktionen, Divergenz-Stufe, compact summary
+            "aktion_alter_tage": sm.get("aktion_alter_tage") if sm.get("aktion_alter_tage") is not None else "",
+            "divergenz_stufe": "-" if etf_flag else divergenz_stufe(row, sm, cfg),
+            "signal_hinweis": sm.get("signal_hinweis", ""),
         })
     cols = list(out[0].keys()) if out else ["ticker"]
     with open(out_path, "w", newline="", encoding="utf-8") as f:
@@ -1741,7 +1847,16 @@ def overlap(ranking_csv: str, watch_csv: str | None, cfg: dict,
         w.writerow(cols)
         for r in out:
             w.writerow([r.get(c, "") for c in cols])
-    logger.info("overlap gespeichert: %s (%d Ticker)", out_path, len(out))
+    stufe = Counter(r["divergenz_stufe"] for r in out)
+    stark_max = float(cfg.get("smart_money", {}).get("rules", {})
+                      .get("divergenz", {}).get("stark_anteil_max", 0.15))
+    stark_anteil = (stufe.get("stark", 0) / len(out)) if out else 0.0
+    logger.info("overlap gespeichert: %s (%d Ticker) | divergenz_stufe stark=%d (%.1f%%, Ziel <= %.0f%%) "
+                "schwach=%d -=%d", out_path, len(out), stufe.get("stark", 0), stark_anteil * 100,
+                stark_max * 100, stufe.get("schwach", 0), stufe.get("-", 0))
+    if out and stark_anteil > stark_max:
+        logger.warning("overlap: stark-Anteil %.1f%% > Ziel %.0f%% (rules.divergenz.stark_anteil_max)",
+                       stark_anteil * 100, stark_max * 100)
     return out
 
 
@@ -1819,11 +1934,12 @@ def cmd_score(args) -> None:
     print(f"{'ticker':<8} {'score':>5} {'kaeufer':<30} {'verkaeufer':<20} {'alter_t':>7}  letzte_aktion / filing / katalysator / rationale")
     for t in tickers:
         s = smart_money_score(t, cfg, db_path=Path(args.db))
-        rat = f"ja {s['rationale_quelle']}" if s["rationale_vorhanden"] else "nein"  # 
+        rat = f"ja {s['rationale_quelle']}" if s["rationale_vorhanden"] else "nein"
         print(f"{t:<8} {s['score']:>5} {','.join(s['fonds_kaeufer']) or '-':<30} "
               f"{','.join(s['fonds_verkaeufer']) or '-':<20} "
               f"{str(s['daten_alter_tage'] if s['daten_alter_tage'] is not None else '-'):>7}  "
-              f"{s['letzte_aktion'] or '-'} | {s['filing_datum'] or '-'} | {s['katalysator_13d'] or '-'} | {rat}")
+              f"{s['letzte_aktion'] or '-'} | {s['filing_datum'] or '-'} | {s['katalysator_13d'] or '-'} | {rat}"
+              f" | {s.get('signal_hinweis') or '-'}")
 
 
 def cmd_overlap(args) -> None:
@@ -1837,10 +1953,17 @@ def cmd_overlap(args) -> None:
     for line in plausibility_lines(rep):
         print(line)
     print(f"\n=== smart_money_overlap ({len(out)} Ticker) -> {args.out} ===")
-    print(f"{'ticker':<8} {'status_all':<28} {'score':>5} {'urteil':<14} kaeufer / verkaeufer")
+    print(f"{'ticker':<8} {'status_all':<28} {'score':>5} {'urteil':<14} {'div_stufe':<9} kaeufer / verkaeufer")
     for r in out:
         print(f"{r['ticker']:<8} {r['status_all'][:28]:<28} {r['smart_money_score']:>5} "
-              f"{r['smart_money_urteil']:<14} {r['fonds_kaeufer'] or '-'} / {r['fonds_verkaeufer'] or '-'}")
+              f"{r['smart_money_urteil']:<14} {r.get('divergenz_stufe', '-'):<9} "
+              f"{r['fonds_kaeufer'] or '-'} / {r['fonds_verkaeufer'] or '-'}")
+    stufe = Counter(r.get("divergenz_stufe", "-") for r in out)
+    stark_max = float(cfg.get("smart_money", {}).get("rules", {})
+                      .get("divergenz", {}).get("stark_anteil_max", 0.15))
+    n = len(out) or 1
+    print(f"Divergenz-Stufen: stark={stufe.get('stark', 0)} ({stufe.get('stark', 0) / n:.1%}, "
+          f"Ziel <= {stark_max:.0%}) schwach={stufe.get('schwach', 0)} -={stufe.get('-', 0)}")
     # Watch-Ticker ohne Fonds-Treffer ausdruecklich auflisten (nicht weglassen)
     aktive = {r[0] for r in con.execute(
         "SELECT DISTINCT ticker FROM smart_money_positions WHERE ticker IS NOT NULL")}

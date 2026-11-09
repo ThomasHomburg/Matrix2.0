@@ -56,7 +56,7 @@ Tool, das ein Aktienuniversum automatisch nach Qualitaet und Bewertung scort und
 - `sec`: `user_agent` (Pflicht, mit E-Mail), `enabled`, `tolerance`, `max_requests_per_second`, `capex_check`
 - `captive_finance.tickers`, `consistency.net_debt_mcap_share`
 - `watchlist`: Statuses, extra_tickers, Flags/Alarme, Szenario-Gewichte, Review-Schwellen
-- `smart_money`: `funds` (name/cik/typ/gewicht/positions_soll_max), `max_requests_per_second`, `retry_429`, `quarters`, `cusip_map_url` (OpenFIGI), `cusip_map` (statisch), `etf_ticker` (ETF/Index-Liste), `googl_merge`, `rationale_csv`, `rules` (Score 1-4: ein_fonds_anteil_max, gewicht_summe_min, anteil_gewicht1_min, zwei_quartale, verkauf_schwelle, verkauf_min_score)
+- `smart_money`: `funds` (name/cik/typ/gewicht/positions_soll_max), `max_requests_per_second`, `retry_429`, `quarters`, `cusip_map_url` (OpenFIGI), `cusip_map` (statisch), `etf_ticker` (ETF/Index-Liste), `googl_merge`, `rationale_csv`, `rules` (Score 1-4: ein_fonds_anteil_max, gewicht_summe_min, anteil_gewicht1_min, zwei_quartale, verkauf_schwelle, verkauf_min_score; v51: aktion_max_alter_tage=200 -- zu alte Aktionen zaehlen nicht fuer Score/Urteil, divergenz: stark_score_min/schwach_score_min/schwach_quality_min/mos_min_grenze/stark_anteil_max fuer Spalte divergenz_stufe)
 - `universe`: S&P-500-URL/CSV, STOXX-600-CSV, Batch-Groesse/Pause, Resume, Cache-Datei
 
 ## UI (Streamlit)

@@ -3,6 +3,9 @@
 Versionshistorie des Value-Screeners. Pro Version ein Absatz: was, warum, Tests.
 Aktueller Stand siehe "Status" in CLAUDE.md / README.md.
 
+## v51
+Smart-Money-Signalqualitaet (kein Volllauf, nur Mocks/Seed-DBs in Tests). (1) Aktionen werden ueber CUSIP verglichen: war der CUSIP im Vorquartal nicht gemappt, findet der Lookup die Position ueber den CUSIP trotzdem -- kein falsches "neu" mehr (Diagnose Berkshire DVA/MCO: beide in allen 13F-HR 2025-Q1..2026-Q2 mit gleichem CUSIP vorhanden; Ursache war u. a. das verschachtelte <sshPrnamt>, das der Parser nicht las -> shares NaN -> "neu"). Fehlt das Vorquartals-Filing oder ist die Position dort nicht auffindbar (Mapping-Luecke), ist die Aktion "unbekannt", nicht "neu"; Parser liest jetzt sshPrnamt (Fallback flaches Format). (2) rules.aktion_max_alter_tage (Default 200): zu alte Aktionen zaehlen nicht fuer Score/Urteil, bleiben aber in der CSV (neue Spalte aktion_alter_tage). (3) Urteil "gemischt", wenn Fonds mit Gewicht > 0 im selben Quartal kaufen UND verkaufen. (4) Neue Spalte divergenz_stufe (stark|schwach|-) nach rules.divergenz: "stark" nur bei Score >= 3 bzw. Score >= 2 + Quality >= 60 UND MoS-Minimum > -100 %, sonst "schwach"; Zaehlung je Stufe in overlap-Log/cmd_overlap, Ziel stark_anteil_max 15 %. (5) Neue Spalte signal_hinweis (z. B. "13F 2026-Q2, 87 Tage alt, 3 Fonds"). Tests test_v51_signalqualitaet (13): 521 passed, 1 skipped.
+
 ## v50
 Projekt-Wegzug in das frische Repository github.com/ThomasHomburg/Matrix2.0 (ein initialer Commit, ohne alte Historie). Doku aufgeraeumt: Versions-Tags (vNN) aus allen Kommentaren/Docstrings entfernt (fachlicher Inhalt steht), Changelog in diese Datei ausgelagert, CLAUDE.md als kompakte strukturierte Doku neu aufgebaut, README beschreibt den aktuellen Stand. Keine Logik-Aenderung: 508 passed, 1 skipped vor und nach dem Aufraeumen.
 
