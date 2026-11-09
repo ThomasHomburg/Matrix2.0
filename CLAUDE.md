@@ -33,7 +33,7 @@ Tool, das ein Aktienuniversum automatisch nach Qualitaet und Bewertung scort und
 - `app.py` -- Streamlit-App (Seite 1 Rangliste, Seite 2 Scorecard, Seite 3 Matrix, Seite 4 Import)
 - `run_ranking.py` -- Volllauf-CLI (Batches, Pause, Resume via Cache, Fehlerlog, Ergebnis-CSV); `run_universe.py` -- Universumslader (S&P 500 via Wikipedia, STOXX 600 via CSV); `testlauf_run.py`, `rohwerte_check.py` -- Diagnose/Testlaeufe
 - `smart_money.py` -- Smart-Money-Pipeline (eigenstaendig, siehe Config-Referenz `smart_money` und README)
-- `live_update.py` -- Watchlist Live-Update (Preise, MoS live, Kaufzonen, Alarme, attach_smart_money); `decisions.py` -- Entscheidungslog (add/snapshot/review, Brier-Kalibrierung); `timing.py` -- Timing-Indikatoren
+- `live_update.py` -- Watchlist Live-Update (Preise, MoS live, Kaufzonen, Alarme, attach_smart_money); `decisions.py` -- Entscheidungslog (add/snapshot/review, Brier-Kalibrierung; v52 Vergleichkoerbe: snapshot --korb all --datum, review -> decisions_review.csv, Hypothesen in docs/hypothesen.md); `timing.py` -- Timing-Indikatoren
 - `schema.sql` -- SQLite-Schema `value_tracker.db` (prices, valuations, watchlist_status, decisions, smart_money_positions, smart_money_options, smart_money_katalysator, smart_money_rationale, cusip_map); bei Bedarf automatisch angelegt, Migration/Guard in smart_money.connect()
 - `tests/` -- pytest, kein Netz (Fetcher-Fixtures/Mocks)
 

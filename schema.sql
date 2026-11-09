@@ -89,9 +89,27 @@ CREATE TABLE IF NOT EXISTS decisions (
     rendite_pct     REAL,                      -- Rendite nach Ablauf des Horizonts in %
     ereignis_e      INTEGER,                   -- 1 = Rendite nach 12 M >= +10 %, sonst 0 (NULL bis review)
     brier           REAL,                      -- (p - E)^2 (NULL bis review)
-    reviewed_at     TEXT                       -- ISO-Zeitpunkt des review
+    reviewed_at     TEXT,                      -- ISO-Zeitpunkt des review
+    -- v52 Vergleichkoerbe (snapshot --korb); korb <> '' kennzeichnet Korb-Zeilen,
+    -- Alt-DBs bekommen die Spalten per ALTER in decisions._migrate_decisions
+    korb            TEXT NOT NULL DEFAULT '',
+    kurs_datum      TEXT,
+    quality         REAL,
+    mos_min         REAL,
+    mos_robust      REAL,
+    kaufzone_kurs   REAL,
+    timing_status   TEXT,
+    smart_money_score INTEGER,
+    urteil          TEXT,                      -- smart_money_urteil aus overlap-CSV
+    divergenz_stufe TEXT,                      -- stark|schwach|- (v51)
+    fonds_kaeufer   TEXT,
+    fonds_verkaeufer TEXT,
+    wahrscheinlichkeit_p REAL                   -- p = erwartungswert_pct/100 (Rendite >= +10 % in 12 M)
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_ticker ON decisions (ticker);
+-- Idempotenz der Korb-Snapshots: (ticker, korb, datum) eindeutig -- geschriebene
+-- Zeilen werden nie ueberschrieben (partieller Index, Legacy-Zeilen korb='' unberuehrt)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_decisions_korb_datum ON decisions(ticker, korb, datum) WHERE korb <> '';
 CREATE INDEX IF NOT EXISTS idx_decisions_datum ON decisions (datum);
 
 -- Smart Money -- 13F-Positionen; eindeutiger Schluessel (fonds, periode, cusip, accession)

@@ -60,6 +60,31 @@ python smart_money.py show TICKER | show --fonds FONDS [--db ...]
 - **Rationale fuer Score 4**: `rationale-template` schreibt eine Import-Vorlage mit allen Score-4-Kandidaten; `rationale-import` bricht bei fehlendem text/quelle_url mit Zeilennummer ab (atomar); Duplikate (ticker, fonds, quelle_url) werden ueberschrieben; die Quelle erscheint als Spalte `rationale_quelle` in der overlap-CSV. Aktueller Entwurf liegt in `rationale_import.csv` (jede Zeile mit [ENTWURF] zur Pruefung).
 - **Signalqualitaet (v51)**: Aktionen werden ueber CUSIP verglichen (kein falsches "neu" bei Mapping-Luecke im Vorquartal; fehlendes Vorquartals-Filing -> Aktion "unbekannt"). `rules.aktion_max_alter_tage` (Default 200): zu alte Aktionen zaehlen nicht fuer Score/Urteil, bleiben aber in der CSV (`aktion_alter_tage`). Urteil "gemischt" bei Kauf + Verkauf durch Fonds mit Gewicht > 0 im selben Quartal. Neue Spalten `divergenz_stufe` (stark|schwach|- nach `rules.divergenz`: stark nur bei Score >= 3 bzw. Score >= 2 + Quality >= 60 UND MoS-Min > -100 %) und `signal_hinweis` (z. B. "13F 2026-Q2, 87 Tage alt, 3 Fonds"). Zaehlung der Divergenz-Stufen in der overlap-Ausgabe (Ziel: <= 15 % stark).
 
+## Entscheidungslog mit Vergleichkoerben (decisions.py, SQLite value_tracker.db)
+
+Koerbe (config `decisions.baskets`): `screener` (alle Kandidat/Beobachtung), `divergenz`
+(Status nein + `divergenz_stufe` stark + Quality >= 60, max. 15 nach SM-Score/Quality;
+**ohne** `divergenz_stufe` Ersatzregel SM-Score >= 3 + Quality >= 60), `kontrolle`
+(15 per Zufall, Seed 42, Status nein + SM-Score 1 + ohne Fondsaktivitaet), `benchmark`
+(SPY, RSP).
+
+**Nach jedem neuen 13F-Quartal** (`smart_money.py fetch`) Snapshot mit Datum des Quartals:
+
+```bash
+python decisions.py snapshot --korb all --datum <Datum des 13F-Quartals> \
+    [--ranking ranking.csv] [--overlap smart_money_overlap.csv] [--live watchlist_live.csv]
+python decisions.py review [--heute YYYY-MM-DD]     # -> decisions_review.csv
+```
+
+Snapshot schreibt je Ticker und Korb eine Zeile (aktion=auto, Kurs, Status, Quality, MoS,
+iv_bear/base/bull, kaufzone_kurs, timing_status, Smart-Money-Felder, Szenariogewichte
+25/50/25, Erwartungswert %, wahrscheinlichkeit_p) und ist **idempotent je
+(ticker, korb, datum)** -- geschriebene Zeilen werden nie ueberschrieben. Review fuellt
+Kurse nach (Horizonte 3/6/12/24 Monate aus config `decisions.horizonte_monate`) und
+schreibt je Korb/Horizont Mittelwert, Median, Anteil mit Ueberrendite vs. SPY,
+Differenz zu kontrolle, n und Brier-Score von p (bei n < 30: "unkalibriert, n=...")
+als Tabelle und `decisions_review.csv`. Hypothesen (H1-H3) siehe `docs/hypothesen.md`.
+
 ## Datenbank (schema.sql)
 
 `value_tracker.db`: `prices`, `valuations`, `watchlist_status`, `decisions` (Screener/Live) sowie `smart_money_positions`, `smart_money_options`, `smart_money_katalysator`, `smart_money_rationale`, `cusip_map` (Smart Money). Wird bei Bedarf automatisch angelegt/migriert.

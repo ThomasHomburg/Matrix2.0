@@ -390,9 +390,32 @@ watchlist:
   # Default-Szenariogewichte fuer das Entscheidungslog (decisions.py)
   szenario_gewichte: {bear: 0.25, base: 0.50, bull: 0.25}
   # Kalibrierungsschwelle -- bei n < min_eintraege "unkalibriert" statt Brier-Kennzahl
+  # (gilt fuer decisions.py review, auch fuer die Korb-Auswertung)
   review_min_eintraege: 30
   # Ereignis E = Rendite nach 12 Monaten >= +10 %
   ereignis_rendite_pct: 0.10
+
+# Entscheidungslog mit Vergleichkoerben (decisions.py snapshot --korb all / review).
+decisions:
+  baskets:
+    # screener: alle Ticker mit einem dieser Status (Default = watchlist.statuses)
+    screener_statuses: ["Kandidat", "Beobachtung", "Beobachtung (nicht normalisiert)"]
+    divergenz:
+      status: "nein"              ## Screener-Status fuer den Divergenz-Korb
+      stufe: "stark"              ## divergenz_stufe aus smart_money_overlap.csv (v51)
+      quality_min: 60
+      max_ticker: 15              ## hoechstens 15 Ticker, sortiert nach SM-Score, dann Quality
+      # Ersatzregel, wenn divergenz_stufe fehlt (kein v51): "stark" =
+      # smart_money_score >= fallback_score_min UND quality >= quality_min
+      fallback_score_min: 3
+    kontrolle:
+      status: "nein"
+      smart_money_score: 1        ## nur Ticker ohne Fondsaktivitaet (keine Kaeufer/Verkaeufer)
+      max_ticker: 15
+      seed: 42                    ## fester Seed -> reproduzierbarer Zufallskorb
+    benchmark: [SPY, RSP]         ## SPY = Referenz, RSP = gleichgewichtet
+  horizonte_monate: [3, 6, 12, 24]  ## Review-Horizonte (30 Tage/Monat)
+  review_csv: "decisions_review.csv"
 
 # Smart Money (13F-HR der Fonds aus SEC EDGAR).
 # funds: je Fonds name/cik/typ/gewicht/positions_soll_max. Bekannte CIKs fest

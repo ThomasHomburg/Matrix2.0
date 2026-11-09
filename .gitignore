@@ -9,5 +9,6 @@ tickers_stoxx600.csv
 .ranking_cache.json
 ranking_*.csv
 smart_money_overlap*.csv
+decisions_review.csv
 sec_test.py
 debug_fetch*.py

@@ -16,8 +16,14 @@ add: speichert Datum, Kurs, Screener-Status, iv_* (aus valuations-Snapshot zum
      der Gewichte der Szenarien mit iv >= 1,10 x Kurs) und Horizont 12/24 Monate.
 snapshot: legt monatlich automatisch einen Eintrag (aktion=auto) fuer alle
      Kandidaten und Beobachtungstitel an (Track-Record ohne manuelle Arbeit).
+     v52: snapshot --korb all [--datum JJJJ-MM-TT] schreibt je Ticker und Korb
+     (screener|divergenz|kontrolle|benchmark, config decisions.baskets) eine Zeile;
+     idempotent je (ticker, korb, datum), geschriebene Zeilen werden nie ueberschrieben.
 review: fuellt fuer Eintraege aelter als 12/24 Monate den Kurs nach (aus prices
-     oder --ranking CSV), berechnet Rendite und Brier-Score.
+     oder --ranking CSV), berechnet Rendite und Brier-Score. v52: Korb-Review je
+     Korb und Horizont (3/6/12/24 Monate) -> Tabelle + decisions_review.csv
+     (Mittelwert, Median, Anteil Ueberrendite vs. SPY, Differenz zu kontrolle,
+     n, Brier; n < review_min_eintraege -> "unkalibriert, n=...").
      Ereignis E = Rendite nach 12 Monaten >= +10 % (config watchlist.ereignis_rendite_pct).
      Prognosewahrscheinlichkeit p = Summe der Gewichte der Szenarien mit iv >= 1,10 x Kurs.
      Bei n < watchlist.review_min_eintraege (Default 30): "unkalibriert, n=..."
@@ -29,7 +35,9 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import random
 import sqlite3
+import statistics
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -43,10 +51,46 @@ AKTIONEN = ("watch", "kauf", "verkauf", "nichts")
 HORIZONTS = (12, 24)
 
 
+# v52 Vergleichkoerbe: neue Spalten der decisions-Tabelle; Alt-DBs per ALTER
+DECISIONS_KORB_SPALTEN = (
+    ("korb", "TEXT NOT NULL DEFAULT ''"),
+    ("kurs_datum", "TEXT"),
+    ("quality", "REAL"),
+    ("mos_min", "REAL"),
+    ("mos_robust", "REAL"),
+    ("kaufzone_kurs", "REAL"),
+    ("timing_status", "TEXT"),
+    ("smart_money_score", "INTEGER"),
+    ("urteil", "TEXT"),
+    ("divergenz_stufe", "TEXT"),
+    ("fonds_kaeufer", "TEXT"),
+    ("fonds_verkaeufer", "TEXT"),
+    ("wahrscheinlichkeit_p", "REAL"),
+)
+
+KORB_NAMEN = ("screener", "divergenz", "kontrolle", "benchmark")
+
+
+def _migrate_decisions(con: sqlite3.Connection) -> None:
+    """v52: Korb-Spalten per ALTER additiv ergaenzen (Alt-DBs) + partieller
+    UNIQUE-Index (ticker, korb, datum) fuer Korb-Zeilen -- Idempotenz der Snapshots;
+    geschriebene Zeilen werden nie ueberschrieben."""
+    cols = {r[1] for r in con.execute("PRAGMA table_info(decisions)")}
+    if not cols:
+        return
+    for col, decl in DECISIONS_KORB_SPALTEN:
+        if col not in cols:
+            con.execute(f"ALTER TABLE decisions ADD COLUMN {col} {decl}")
+    con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_decisions_korb_datum "
+                "ON decisions(ticker, korb, datum) WHERE korb <> ''")
+    con.commit()
+
+
 def init_db(db_path: Path = DB_PATH) -> sqlite3.Connection:
     """Legt value_tracker.db an und fuehrt schema.sql aus (idempotent)."""
     con = sqlite3.connect(db_path)
     con.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+    _migrate_decisions(con)
     con.commit()
     return con
 
@@ -56,6 +100,7 @@ def _connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
         return init_db(db_path)
     con = sqlite3.connect(db_path)
     con.row_factory = sqlite3.Row
+    _migrate_decisions(con)
     return con
 
 
@@ -135,6 +180,128 @@ def _default_gewichte(cfg: dict) -> dict[str, float]:
 
 
 # --------------------------------------------------------------------------
+# v52 Vergleichkoerbe: Zusammensetzung aus ranking + overlap + live CSV
+# --------------------------------------------------------------------------
+
+def _load_csv_rows(path: str | None) -> list[dict]:
+    if not path or not Path(path).exists():
+        return []
+    with open(path, newline="", encoding="utf-8") as f:
+        return [r for r in csv.DictReader(f)
+                if r.get("ticker") and not str(r["ticker"]).startswith("#")]
+
+
+def _f(row: dict, *keys: str) -> float:
+    for k in keys:
+        v = (row or {}).get(k)
+        if v not in (None, ""):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                pass
+    return float("nan")
+
+
+def _i(row: dict, *keys: str) -> int | None:
+    x = _f(row, *keys)
+    return int(x) if x == x else None
+
+
+def _status(row: dict) -> str:
+    return ((row or {}).get("status_all") or (row or {}).get("status") or "").strip()
+
+
+def _korb_rows(ranking_csv: str | None, overlap_csv: str | None = None,
+               live_csv: str | None = None) -> list[dict]:
+    """Je Ticker eine angereicherte Zeile: ranking-CSV (Kurs/IV/MoS/Quality/Status)
+    + overlap-CSV (Smart Money, v51 inkl. divergenz_stufe) + live-CSV (kaufzone/
+    timing, nur wenn in ranking nicht vorhanden)."""
+    rows: dict[str, dict] = {}
+    for r in _load_csv_rows(ranking_csv):
+        t = (r.get("ticker") or "").strip().upper()
+        rows[t] = {**r, "ticker": t}
+    for r in _load_csv_rows(overlap_csv):
+        t = (r.get("ticker") or "").strip().upper()
+        base = rows.setdefault(t, {"ticker": t})
+        for k in ("smart_money_score", "fonds_kaeufer", "fonds_verkaeufer", "letzte_aktion",
+                  "smart_money_urteil", "divergenz_stufe", "signal_hinweis", "etf",
+                  "aktion_alter_tage"):
+            if k in r:
+                base[k] = r[k]
+    for r in _load_csv_rows(live_csv):
+        t = (r.get("ticker") or "").strip().upper()
+        base = rows.setdefault(t, {"ticker": t})
+        for k in ("kaufzone_kurs", "timing_status", "kurs", "kurs_datum", "status_screener"):
+            if k in r and k not in base:
+                base[k] = r[k]
+    return list(rows.values())
+
+
+def koerbe(cfg: dict, rows: list[dict]) -> dict[str, list[dict]]:
+    """Korb-Zusammensetzung nach config decisions.baskets.
+
+    screener: alle Ticker mit Status aus screener_statuses.
+    divergenz: Status nein + divergenz_stufe "stark" + Quality >= quality_min,
+      max max_ticker, sortiert nach Smart-Money-Score, dann Quality (absteigend).
+      Fehlt divergenz_stufe (kein v51) -> Ersatzregel: SM-Score >= fallback_score_min
+      UND Quality >= quality_min.
+    kontrolle: max_ticker Ticker per Zufall (fester Seed) aus Status nein mit
+      SM-Score kontrolle.smart_money_score und ohne Fondsaktivitaet (keine
+      Kaeufer/Verkaeufer).
+    benchmark: Liste benchmark (SPY, RSP), soweit in den Zeilen vorhanden.
+    """
+    b = cfg.get("decisions", {}).get("baskets", {})
+    out: dict[str, list[dict]] = {}
+    st = set(b.get("screener_statuses") or cfg.get("watchlist", {}).get(
+        "statuses", ["Kandidat", "Beobachtung", "Beobachtung (nicht normalisiert)"]))
+    out["screener"] = [r for r in rows if _status(r) in st]
+
+    d = b.get("divergenz", {})
+    d_status = str(d.get("status", "nein"))
+    d_stufe = str(d.get("stufe", "stark"))
+    q_min = float(d.get("quality_min", 60))
+    d_max = int(d.get("max_ticker", 15))
+    fb_score = int(d.get("fallback_score_min", 3))
+    has_stufe = any("divergenz_stufe" in r for r in rows)   # Spalte im overlap-CSV vorhanden?
+    div = []
+    for r in rows:
+        if _status(r) != d_status:
+            continue
+        q = _f(r, "quality")
+        if q != q or q < q_min:
+            continue
+        score = _f(r, "smart_money_score")
+        if has_stufe:
+            stark = (r.get("divergenz_stufe") or "") == d_stufe
+        else:
+            stark = score == score and score >= fb_score    # Ersatzregel ohne divergenz_stufe
+        if stark:
+            div.append(r)
+    div.sort(key=lambda r: (-_f(r, "smart_money_score"), -_f(r, "quality"), r["ticker"]))
+    out["divergenz"] = div[:d_max]
+
+    k = b.get("kontrolle", {})
+    k_status = str(k.get("status", "nein"))
+    k_score = int(k.get("smart_money_score", 1))
+    k_max = int(k.get("max_ticker", 15))
+    seed = int(k.get("seed", 42))
+    bench = {str(t).upper() for t in (b.get("benchmark") or ["SPY", "RSP"])}
+    cands = sorted(r["ticker"] for r in rows
+                   if _status(r) == k_status
+                   and _f(r, "smart_money_score") == k_score
+                   and not str(r.get("fonds_kaeufer") or "").strip()
+                   and not str(r.get("fonds_verkaeufer") or "").strip()
+                   and r["ticker"] not in bench)   # Benchmark-Ticker nicht in die Kontrolle
+    pick = random.Random(seed).sample(cands, min(k_max, len(cands))) if cands else []
+    by_t = {r["ticker"]: r for r in rows}
+    out["kontrolle"] = [by_t[t] for t in pick]
+
+    out["benchmark"] = [by_t[t] for t in (b.get("benchmark") or ["SPY", "RSP"])
+                        if t in by_t]
+    return out
+
+
+# --------------------------------------------------------------------------
 # add
 # --------------------------------------------------------------------------
 
@@ -197,10 +364,15 @@ def _watchlist_aus_ranking(ranking_csv: str | None, cfg: dict) -> list[dict]:
 def cmd_snapshot(args) -> None:
     cfg = load_config()
     con = _connect(Path(args.db))
+    korb_arg = getattr(args, "korb", None)
+    if korb_arg:
+        _snapshot_koerbe(args, cfg, con)
+        return
     heute = _heute()
-    # monatlich: nur einmal pro Kalendermonat snapshotten
+    # monatlich: nur einmal pro Kalendermonat snapshotten (Legacy-Zeilen korb='')
     cur = con.execute(
-        "SELECT COUNT(*) AS n FROM decisions WHERE aktion='auto' AND strftime('%Y-%m', datum)=?",
+        "SELECT COUNT(*) AS n FROM decisions WHERE aktion='auto' AND korb='' "
+        "AND strftime('%Y-%m', datum)=?",
         (heute.strftime("%Y-%m"),))
     if cur.fetchone()["n"] > 0:
         print(f"Snapshot fuer {heute.strftime('%Y-%m')} existiert bereits -- nichts zu tun.")
@@ -233,6 +405,69 @@ def cmd_snapshot(args) -> None:
     print(f"Snapshot {heute.isoformat()}: {n} Auto-Eintraege (aktion=auto, Horizont 12M).")
 
 
+def _snapshot_koerbe(args, cfg: dict, con: sqlite3.Connection) -> None:
+    """v52: snapshot --korb all|screener|divergenz|kontrolle|benchmark [--datum ...].
+    Schreibt je Ticker und Korb eine Zeile (aktion=auto). Idempotent je
+    (ticker, korb, datum): vorhandene Zeilen werden uebersprungen, nie ueberschrieben."""
+    korb_arg = args.korb
+    datum = (_parse_date(args.datum).isoformat() if getattr(args, "datum", None)
+             else _heute().isoformat())
+    overlap = getattr(args, "overlap", None) or (
+        "smart_money_overlap.csv" if Path("smart_money_overlap.csv").exists() else None)
+    live = getattr(args, "live", None) or (
+        "watchlist_live.csv" if Path("watchlist_live.csv").exists() else None)
+    rows = _korb_rows(getattr(args, "ranking", None), overlap, live)
+    if not rows:
+        print("Keine Ranking-Zeilen gefunden -- --ranking <csv> angeben.", file=sys.stderr)
+        sys.exit(1)
+    koerbe_map = koerbe(cfg, rows)
+    namen = list(KORB_NAMEN) if korb_arg == "all" else [korb_arg]
+    gew = _default_gewichte(cfg)
+    total_w = total_s = 0
+    for name in namen:
+        w = s = 0
+        for r in koerbe_map.get(name, []):
+            t = r["ticker"]
+            kurs = _f(r, "kurs")
+            if kurs != kurs or kurs <= 0:
+                continue  # kein Kurs -> keine Zeile (kurs ist NOT NULL)
+            exists = con.execute(
+                "SELECT 1 FROM decisions WHERE ticker=? AND korb=? AND datum=?",
+                (t, name, datum)).fetchone()
+            if exists:
+                s += 1
+                continue  # idempotent: geschriebene Zeilen nie ueberschreiben
+            ew = erwartungswert_pct(_f(r, "iv_bear"), _f(r, "iv_base"), _f(r, "iv_bull"),
+                                    kurs, gew)
+            con.execute(
+                """INSERT INTO decisions
+                   (ticker, datum, aktion, korb, kurs, kurs_datum, status_screener, quality,
+                    mos_min, mos_robust, iv_base, iv_bear, iv_bull, kaufzone_kurs,
+                    timing_status, smart_money_score, urteil, divergenz_stufe,
+                    fonds_kaeufer, fonds_verkaeufer,
+                    gew_bear, gew_base, gew_bull, erwartungswert_pct, wahrscheinlichkeit_p,
+                    horizont_monate, thesis, break_condition)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (t, datum, "auto", name, kurs, str(r.get("kurs_datum") or ""), _status(r),
+                 _f(r, "quality"), _f(r, "mos_min", "mos_rule", "margin_of_safety"),
+                 _f(r, "mos_robust"), _f(r, "iv_base"), _f(r, "iv_bear"), _f(r, "iv_bull"),
+                 _f(r, "kaufzone_kurs"), str(r.get("timing_status") or ""),
+                 _i(r, "smart_money_score"),
+                 str(r.get("smart_money_urteil") or r.get("urteil") or ""),
+                 str(r.get("divergenz_stufe") or ""),
+                 str(r.get("fonds_kaeufer") or ""), str(r.get("fonds_verkaeufer") or ""),
+                 gew["bear"], gew["base"], gew["bull"], ew,
+                 (ew / 100.0 if ew == ew else None),
+                 12, f"auto-Snapshot Korb {name}", ""))
+            w += 1
+        print(f"Korb {name}: {w} geschrieben, {s} bereits vorhanden (datum={datum}).")
+        total_w += w
+        total_s += s
+    con.commit()
+    print(f"Snapshot {datum} --korb {korb_arg}: {total_w} Zeilen geschrieben, "
+          f"{total_s} uebersprungen (idempotent je ticker/korb/datum).")
+
+
 # --------------------------------------------------------------------------
 # review: Kurs nachfuellen, Rendite + Brier-Score, Kalibrierung
 # --------------------------------------------------------------------------
@@ -244,6 +479,94 @@ def _kurs_nach(con: sqlite3.Connection, ticker: str, wann: date) -> float:
         (ticker, wann.isoformat()))
     r = cur.fetchone()
     return float(r["kurs"]) if r else float("nan")
+
+
+# --------------------------------------------------------------------------
+# v52 Korb-Review: Kennzahlen je Korb + Horizont, Brier, decisions_review.csv
+# --------------------------------------------------------------------------
+
+def _korb_review(con: sqlite3.Connection, cfg: dict, heute: date,
+                 out_path: Path) -> list[dict]:
+    """v52: Auswertung der Korb-Snapshots (korb <> ''). Pro (korb, snapshot-datum,
+    horizont) aus prices: n, Mittelwert, Median, Anteil mit Ueberrendite vs. SPY,
+    Median-Ueberrendite vs. SPY, Differenz des Medians zu kontrolle, Brier-Mittel
+    (nur 12M, aus ereignis/brier der Zeilen). n < review_min_eintraege ->
+    "unkalibriert, n=...". Schreibt decisions_review.csv (UTF-8)."""
+    dcfg = cfg.get("decisions", {})
+    horizonte = [int(h) for h in dcfg.get("horizonte_monate", [3, 6, 12, 24])]
+    min_n = int(cfg.get("watchlist", {}).get("review_min_eintraege", 30))
+    rows = [dict(r) for r in con.execute(
+        "SELECT * FROM decisions WHERE korb <> '' ORDER BY datum, korb, ticker")]
+    if not rows:
+        return []
+    spy0 = {r["datum"]: r["kurs"] for r in rows
+            if r["korb"] == "benchmark" and r["ticker"] == "SPY"}
+
+    def _spy_rend(datum: str, h: int) -> float:
+        k0 = spy0.get(datum)
+        if not k0 or k0 <= 0:
+            return float("nan")
+        kn = _kurs_nach(con, "SPY", _parse_date(datum) + timedelta(days=30 * h))
+        return (kn / k0 - 1.0) if kn == kn and kn > 0 else float("nan")
+
+    groups: dict[tuple, list[dict]] = {}
+    for r in rows:
+        for h in horizonte:
+            groups.setdefault((r["korb"], r["datum"], h), []).append(r)
+
+    out = []
+    for (korb, datum, h), grp in sorted(groups.items()):
+        rends: list[float] = []
+        briers: list[float] = []
+        for r in grp:
+            kn = _kurs_nach(con, r["ticker"], _parse_date(datum) + timedelta(days=30 * h))
+            if kn == kn and kn > 0 and r["kurs"] and r["kurs"] > 0:
+                rends.append(kn / r["kurs"] - 1.0)
+            if h == 12 and r["brier"] is not None:
+                briers.append(float(r["brier"]))
+        n = len(rends)
+        if n == 0:
+            continue
+        srend = _spy_rend(datum, h)
+        ueber = [x - srend for x in rends if srend == srend]
+        out.append({
+            "korb": korb, "datum": datum, "horizont_monate": h, "n": n,
+            "mittelwert_pct": (sum(rends) / n) * 100.0,
+            "median_pct": statistics.median(rends) * 100.0,
+            "anteil_ueber_spy": (sum(1 for u in ueber if u > 0) / len(ueber)) if ueber else float("nan"),
+            "median_ueberrendite_spy_pct": (statistics.median(ueber) * 100.0) if ueber else float("nan"),
+            "brier_mean": (sum(briers) / len(briers)) if briers else None,
+            "kalibrierung": "ja" if n >= min_n else f"unkalibriert, n={n}",
+        })
+    # Differenz des Medians zu kontrolle (gleiches snapshot-datum + horizont)
+    med = {(o["korb"], o["datum"], o["horizont_monate"]): o["median_pct"] for o in out}
+    for o in out:
+        k_med = med.get(("kontrolle", o["datum"], o["horizont_monate"]))
+        o["median_diff_kontrolle_pct"] = (o["median_pct"] - k_med) if k_med is not None else None
+
+    cols = ["korb", "datum", "horizont_monate", "n", "mittelwert_pct", "median_pct",
+            "anteil_ueber_spy", "median_ueberrendite_spy_pct", "median_diff_kontrolle_pct",
+            "brier_mean", "kalibrierung"]
+    with open(out_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(cols)
+        for o in out:
+            w.writerow([("" if o.get(c) is None else
+                         (f"{o[c]:.4f}" if isinstance(o.get(c), float) else o.get(c)))
+                        for c in cols])
+
+    print(f"\n=== Korb-Review {heute.isoformat()} (Horizonte {horizonte}) -> {out_path} ===")
+    print(f"{'korb':<11} {'datum':<10} {'hor':>4} {'n':>4} {'mittel%':>8} {'median%':>8} "
+          f"{'>SPY':>6} {'medUeSPY%':>9} {'dKontrolle%':>11} {'brier':>7}  kalibrierung")
+    for o in out:
+        def _p(x, spec=">8.1f"):
+            return "n/a" if x is None or (isinstance(x, float) and math.isnan(x)) else format(x, spec)
+        print(f"{o['korb']:<11} {o['datum']:<10} {o['horizont_monate']:>4} {o['n']:>4} "
+              f"{_p(o['mittelwert_pct'])} {_p(o['median_pct'])} "
+              f"{_p(o['anteil_ueber_spy'], '>6.2f')} {_p(o['median_ueberrendite_spy_pct'], '>9.1f')} "
+              f"{_p(o['median_diff_kontrolle_pct'], '>11.1f')} {_p(o['brier_mean'], '>7.4f')}  "
+              f"{o['kalibrierung']}")
+    return out
 
 
 def cmd_review(args) -> None:
@@ -295,6 +618,10 @@ def cmd_review(args) -> None:
     else:
         print(f"Kalibrierung: n={n}, mittlerer Brier-Score = {agg['brier']:.4f} "
               f"(0 = perfekt, 0.25 = Referenz Zufall).")
+    # v52: Korb-Auswertung (decisions_review.csv)
+    out_csv = getattr(args, "out", None) or cfg.get("decisions", {}).get(
+        "review_csv", "decisions_review.csv")
+    _korb_review(con, cfg, heute, Path(out_csv))
     cmd_list(args)
 
 
@@ -345,14 +672,27 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p_add.add_argument("--ranking", default=None, help="ranking CSV (v41 Export-Spalten)")
     p_add.set_defaults(func=cmd_add)
 
-    p_snap = sub.add_parser("snapshot", help="monatlicher Auto-Snapshot aller Watchlist-Titel")
+    p_snap = sub.add_parser("snapshot", help="monatlicher Auto-Snapshot (ohne --korb) bzw. "
+                                              "Korb-Snapshot (v52: --korb all|screener|...)")
     p_snap.add_argument("--ranking", default=None, help="ranking CSV")
+    p_snap.add_argument("--korb", default=None,
+                        choices=list(KORB_NAMEN) + ["all"],
+                        help="v52: Vergleichkorb-Snapshot (all = alle Koerbe)")
+    p_snap.add_argument("--datum", default=None,
+                        help="v52: Snapshot-Datum YYYY-MM-DD (Default: heute; z. B. Datum des 13F-Quartals)")
+    p_snap.add_argument("--overlap", default=None,
+                        help="v52: smart_money_overlap.csv (Default: Datei falls vorhanden)")
+    p_snap.add_argument("--live", default=None,
+                        help="v52: watchlist_live.csv fuer kaufzone_kurs/timing_status (Default: Datei falls vorhanden)")
     p_snap.set_defaults(func=cmd_snapshot)
 
-    p_rev = sub.add_parser("review", help="Kurs nachfuellen, Rendite + Brier, Kalibrierung")
+    p_rev = sub.add_parser("review", help="Kurs nachfuellen, Rendite + Brier, Kalibrierung, "
+                                          "v52: Korb-Review -> decisions_review.csv")
     p_rev.add_argument("--ranking", default=None, help="ranking CSV (Fallback Kurs)")
     p_rev.add_argument("--heute", default=None, help="Referenzdatum YYYY-MM-DD (Default: heute)")
     p_rev.add_argument("--ticker", default=None, help="nur ein Ticker listen (nur list)")
+    p_rev.add_argument("--out", default=None,
+                       help="v52: Ausgabe-CSV der Korb-Auswertung (Default: config decisions.review_csv)")
     p_rev.set_defaults(func=cmd_review)
 
     p_list = sub.add_parser("list", help="alle Entscheidungen anzeigen")
