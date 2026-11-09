@@ -109,7 +109,9 @@ CREATE TABLE IF NOT EXISTS smart_money_positions (
     shares          REAL,
     wert            REAL,                      -- Marktwert USD (infotable: 1000 USD x 1000)
     anteil_portfolio REAL,                     -- wert / Gesamtwert Aktien des Fonds-Quartals
-    aktion          TEXT NOT NULL,             -- neu | erhoeht | reduziert | verkauft | unveraendert
+    aktion          TEXT NOT NULL,             -- neu | erhoeht | reduziert | verkauft | unveraendert | basis | unbekannt
+                                               -- (v51: Vergleich ueber CUSIP; "unbekannt" bei fehlendem Vorquartals-Filing
+                                               --  oder Mapping-Luecke statt "neu")
     aenderung_pct   REAL,                      -- Veraenderung shares gg. Vorquartal
     positions_gesamt INTEGER,                  -- Anzahl Aktien-Positionen des Fonds im Quartal
     rotation_pct    REAL,                      -- Umgeschichteter Wert / Portfoliowert Vorquartal

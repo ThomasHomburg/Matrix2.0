@@ -40,7 +40,8 @@ def _rd(periode: str) -> str:
 
 OVERLAP_COLS = ("ticker,status_all,quality,mos_rule,smart_money_score,fonds_kaeufer,"
                 "fonds_verkaeufer,letzte_aktion,filing_datum,daten_alter_tage,"
-                "katalysator_13d,rationale_vorhanden,smart_money_urteil,etf,rationale_quelle")  # etf; : rationale_quelle am Ende
+                "katalysator_13d,rationale_vorhanden,smart_money_urteil,etf,rationale_quelle,"
+                "aktion_alter_tage,divergenz_stufe,signal_hinweis")  # v51: drei neue Spalten am Ende
 
 
 def _cfg():

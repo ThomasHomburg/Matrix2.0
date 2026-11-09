@@ -209,7 +209,8 @@ def test_score_4_mit_drei_perioden_zwei_neueste_nicht_basis(tmp_path):
     con.execute("INSERT INTO smart_money_rationale (ticker, text, quelle_url) "
                 "VALUES ('AAA','Buffett erhoeht','https://example.com/b')")
     con.commit()
-    s = smart_money.smart_money_score("AAA", cfg, db_path=db)
+    # heute gequencht: Fixture-Filings 2025-05..2025-11, aktion_max_alter_tage=200 (v51)
+    s = smart_money.smart_money_score("AAA", cfg, db_path=db, heute=date(2025, 12, 31))
     # 2025-Q1 basis; 2025-Q2 + 2025-Q3 je cond3 (Anteil 100 % >= 5 % bei Gewicht 1,0) -> 4
     assert s["score"] == 4
     assert s["fonds_kaeufer"] == ["Berkshire Hathaway"]

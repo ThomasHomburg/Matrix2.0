@@ -152,7 +152,7 @@ def test_e_overlap_csv_rationale_quelle(tmp_path):
     rows = smart_money.overlap(str(ranking), str(watch), cfg, db_path=db,
                                out_path=str(out_csv), force=True)
     cols = list(rows[0].keys())
-    assert cols[-1] == "rationale_quelle"                            # neue Spalte am Ende
+    assert cols[-1] == "signal_hinweis"                             # letzte Spalte (v51)
     by_t = {r["ticker"]: r for r in rows}
     assert by_t["AAA"]["rationale_vorhanden"] == "ja"
     assert by_t["AAA"]["rationale_quelle"] == url[:40]
@@ -160,4 +160,4 @@ def test_e_overlap_csv_rationale_quelle(tmp_path):
     assert by_t["BBB"]["rationale_vorhanden"] == "nein"
     assert by_t["BBB"]["rationale_quelle"] == ""
     header = out_csv.read_text(encoding="utf-8").splitlines()[0]
-    assert header.endswith(",rationale_quelle")
+    assert header.endswith(",rationale_quelle,aktion_alter_tage,divergenz_stufe,signal_hinweis")

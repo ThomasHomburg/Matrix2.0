@@ -429,6 +429,15 @@ smart_money:
     zwei_quartale: true          ## Score 4: Score-3-Bedingung in 2 aufeinanderfolgenden Quartalen + Rationale
     verkauf_schwelle: 0.30       ## verkauft oder reduziert >= 30 % -> Score -1 je Fonds
     verkauf_min_score: 1         ## Score nie unter 1
+    aktion_max_alter_tage: 200   ## Aktionen (neu/erhoeht/reduziert/verkauft) mit filing_datum aelter als N Tage
+                                 ## zaehlen NICHT fuer Score/Urteil, bleiben aber in der CSV (aktion_alter_tage)
+    divergenz:                   ## Stufe der Divergenz (CSV-Spalte divergenz_stufe: stark|schwach|-)
+      stark_score_min: 3         ## "stark" nur wenn Score >= 3 ODER (Score >= schwach_score_min UND
+                                 ## Quality >= schwach_quality_min) UND MoS-Minimum > mos_min_grenze
+      schwach_score_min: 2
+      schwach_quality_min: 60
+      mos_min_grenze: -1.0       ## -100 %: MoS-Minimum muss darueber liegen, sonst "schwach"
+      stark_anteil_max: 0.15     ## Ziel: hoechstens 15 % der Ticker mit Stufe "stark" (Zaehlung in overlap)
 
 universe:
   # Universumslader.

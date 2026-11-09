@@ -29,6 +29,17 @@ CIK = {"Berkshire Hathaway": "0001067983", "Pershing Square Capital Management":
        "Duquesne Family Office": "0001536411", "Starboard Value": "0009999999"}
 
 
+@pytest.fixture(autouse=True)
+def _pin_today(monkeypatch):
+    """v51: aktion_max_alter_tage (200) gegen 'heute' -- Fixture-Filings liegen bei
+    2025-08; ohne gepinndes Datum waeren alle Aktionen im Sandbox-'heute' zu alt."""
+    class _FixedDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 11, 1)
+    monkeypatch.setattr(smart_money, "date", _FixedDate)
+
+
 def _cfg():
     cfg = load_config()
     cfg["sec"]["enabled"] = False
@@ -380,7 +391,7 @@ def test_overlap_csv(sm_db, tmp_path):
     rows = smart_money.overlap(str(ranking), str(watch), cfg, db_path=db, out_path=str(out), force=True)
     by = {r["ticker"]: r for r in rows}
     assert set(by) >= {"AAA", "BBB", "CCC", "KAT"}   # Watchlist + aktive Fonds-Ticker
-    assert by["AAA"]["smart_money_urteil"] == "Bestaetigung"   # Fonds kauft + Kandidat
+    assert by["AAA"]["smart_money_urteil"] == "gemischt"       # Kaeufer + Verkaeufer (Gew > 0) selben Quartals (v51)
     assert by["BBB"]["smart_money_urteil"] == "Bestaetigung"   # Fonds verkauft + nein
     assert by["CCC"]["smart_money_urteil"] == "Bestaetigung"   # Fonds kauft + Beobachtung
     assert by["KAT"]["smart_money_urteil"] == "Bestaetigung"   # Duquesne verkauft + nein
