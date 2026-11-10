@@ -30,7 +30,7 @@ Tool, das ein Aktienuniversum automatisch nach Qualitaet und Bewertung scort und
 - `data/` -- Loader, Cache, Provider-Schnittstelle (`data/providers/`: FMP fuer US-Ticker mit Key, yfinance sonst), `data/sec.py` (SEC-EDGAR-Abgleich: OCF/Capex/SBC vs. companyfacts, SBC-Fallback, Capex-Pruefstatus), `data/metrics.py`, `data/tickerlist.py`
 - `scoring/` -- `criteria.py` (Kennzahlen), `filters.py` (harte Ausschlussfilter), `sectors.py` (Sektor-Sonderregeln), `score.py` (Score + Renormalisierung + Coverage), `pipeline.py` (Gesamtlauf je Ticker)
 - `valuation/` -- `dcf.py` (DCF, 3 Szenarien Bear/Base/Bull, 4 Startwert-Modi, robust 10 %, fcf_le0)
-- `app.py` -- Streamlit-App (Seite 1 Rangliste, Seite 2 Scorecard, Seite 3 Matrix, Seite 4 Import)
+- `app.py` -- Streamlit-App (Seite 1 Rangliste, Seite 2 Scorecard, Seite 3 Matrix, Seite 4 Import, Seite 5 Watchlist Live aus value_tracker.db)
 - `run_ranking.py` -- Volllauf-CLI (Batches, Pause, Resume via Cache, Fehlerlog, Ergebnis-CSV); `run_universe.py` -- Universumslader (S&P 500 via Wikipedia, STOXX 600 via CSV); `testlauf_run.py`, `rohwerte_check.py` -- Diagnose/Testlaeufe
 - `smart_money.py` -- Smart-Money-Pipeline (eigenstaendig, siehe Config-Referenz `smart_money` und README)
 - `live_update.py` -- Watchlist Live-Update (Preise, MoS live, Kaufzonen, Alarme, attach_smart_money); `decisions.py` -- Entscheidungslog (add/snapshot/review, Brier-Kalibrierung; v52 Vergleichkoerbe: snapshot --korb all --datum, review -> decisions_review.csv, Hypothesen in docs/hypothesen.md); `timing.py` -- Timing-Indikatoren
@@ -64,6 +64,7 @@ Tool, das ein Aktienuniversum automatisch nach Qualitaet und Bewertung scort und
 - **Seite 2 Scorecard**: Block-Scores als Balken, Kriterien-Details, DCF-Tabelle (3 Szenarien, 4 Startwert-Modi, Nettoverschuldung umschaltbar), letzte Quartale mit Stichtag, SEC-Abgleich, Charts, Rohdaten mit Quelle
 - **Seite 3 Matrix**: Quality (x) vs. MoS (y), Farbe nach Status, Ziel-Quadrant hervorgehoben
 - **Seite 4 Import**: CSV-Upload (Spalte `ticker`) oder manuelle Eingabe
+- **Seite 5 Watchlist Live** (v53): liest value_tracker.db (watchlist_status/valuations/prices/decisions/smart_money_*), neue Funktionen liegen ab `def _formula_block` (app_part2); Kopfzeile Datenstand + Veraltet-Warnung (Kurs > watchlist.kurs_veraltet_tage, Valuation > wert_veraltet_tage, 13F > 140 Tage); Tabelle filter/sortierbar (Korb/Status/Alarm), timing_status als [POS]/[NEU]/[NEG]; Detail je Ticker (Szenarien je Modus + EW, Altair-Chart 1 Jahr vs. Kaufzone, Smart-Money-Block, Entscheidungslog, Platzhalter Trends); Button ruft live_update.py auf (Netz, persistiert prices + watchlist_status); Export watchlist_live_export.csv (ASCII); leere DB -> Meldung statt Exception; Cache st.cache_data TTL 15 Min
 
 ## Build-Reihenfolge (Definition of Done je Schritt)
 1. Loader fuer einen Ticker; Test: Kennzahlen von 3 Referenzunternehmen manuell gegengeprueft

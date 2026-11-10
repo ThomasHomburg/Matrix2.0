@@ -385,6 +385,7 @@ watchlist:
   # wert_veraltet nach naechster_earnings bzw. calc_date-A'lter (Tage);
   # alarm bei Kursrueckfall seit calc_date bzw. Tagesbewegung
   wert_veraltet_tage: 100
+  kurs_veraltet_tage: 3      ## Seite 5 Watchlist Live: letzter Kurs aelter als N Tage -> Warnung
   alarm_kurs_fall_pct: 0.10 ## Kurs <= -10 % seit calc_date
   alarm_tagesbewegung_pct: 0.08 ## Tagesbewegung >= +/-8 %
   # Default-Szenariogewichte fuer das Entscheidungslog (decisions.py)

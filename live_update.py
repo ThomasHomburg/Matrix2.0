@@ -42,6 +42,7 @@ import argparse
 import csv
 import logging
 import math
+import sqlite3
 import sys
 import time
 from datetime import date, datetime, timedelta
@@ -317,6 +318,30 @@ def write_watchlist_csv(rows: list[dict], out_path: str) -> None:
     logger.info("watchlist_live gespeichert: %s (%d Ticker)", out_path, len(rows))
 
 
+def store_live_status(con: sqlite3.Connection, out_rows: list[dict],
+                      prices: dict[str, dict]) -> None:
+    """v53: Live-Stand in value_tracker.db persistieren (Seite 5 Watchlist Live
+    liest von dort): Kurse -> prices, Live-Status -> watchlist_status."""
+    now = datetime.now().isoformat(timespec="seconds")
+    for t, p in prices.items():
+        con.execute(
+            "INSERT OR REPLACE INTO prices (ticker, datum, kurs, quelle, geladen_am) "
+            "VALUES (?,?,?,?,?)",
+            (t, p["datum"], p["kurs"], "yfinance", now))
+    for r in out_rows:
+        con.execute(
+            """INSERT OR REPLACE INTO watchlist_status
+               (ticker, updated_at, kurs, status_screener, status_live, mos_live_min,
+                mos_live_robust, kaufzone_kurs, distanz_pct, timing_status,
+                wert_veraltet, alarm)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (r["ticker"], now, r["kurs"], r["status_screener"], r["status_live"],
+             r["mos_live_min"], r["mos_live_robust"], r["kaufzone_kurs"], r["distanz_pct"],
+             r["timing_status"], r["wert_veraltet"], r["alarm"]))
+    con.commit()
+    logger.info("watchlist_status + prices aktualisiert (%d Ticker)", len(out_rows))
+
+
 def print_table(rows: list[dict]) -> None:
     print(f"\n=== watchlist_live ({len(rows)} Ticker) ===")
     header = (f"{'ticker':<8} {'kurs':>8} {'status_screener':<26} {'status_live':<12} "
@@ -373,6 +398,11 @@ def main() -> None:
         out_rows.append(live_row(row, prices[t]["kurs"], cfg, heute=heute,
                                  vorheriger_kurs=prices[t].get("vorheriger", float("nan"))))
     attach_smart_money(out_rows, cfg, db_path=Path(args.db))
+    # v53: Live-Stand in die DB schreiben (Seite 5 Watchlist Live liest watchlist_status/prices)
+    from decisions import init_db  # lazy import (Schema anlegen, falls DB neu)
+    con = init_db(Path(args.db))
+    store_live_status(con, out_rows, prices)
+    con.close()
     write_watchlist_csv(out_rows, args.out)
     print_table(out_rows)
     if errors:
