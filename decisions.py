@@ -19,6 +19,9 @@ snapshot: legt monatlich automatisch einen Eintrag (aktion=auto) fuer alle
      v52: snapshot --korb all [--datum JJJJ-MM-TT] schreibt je Ticker und Korb
      (screener|divergenz|kontrolle|benchmark, config decisions.baskets) eine Zeile;
      idempotent je (ticker, korb, datum), geschriebene Zeilen werden nie ueberschrieben.
+     v56 Look-ahead: --datum default = heute (Tag des Snapshots); Startkurs = Kurs am
+     Snapshot-Tag (prices); start_datum = max(--datum, juengstes filing_datum der
+     verwendeten 13F); --datum vor filing_datum -> Abbruch "Look-ahead" vor dem Schreiben.
 review: fuellt fuer Eintraege aelter als 12/24 Monate den Kurs nach (aus prices
      oder --ranking CSV), berechnet Rendite und Brier-Score. v52: Korb-Review je
      Korb und Horizont (3/6/12/24 Monate) -> Tabelle + decisions_review.csv
@@ -66,6 +69,7 @@ DECISIONS_KORB_SPALTEN = (
     ("fonds_kaeufer", "TEXT"),
     ("fonds_verkaeufer", "TEXT"),
     ("wahrscheinlichkeit_p", "REAL"),
+    ("start_datum", "TEXT"),   # v56 Look-ahead: max(Snapshot-Datum, juengstes filing_datum verwendeter 13F)
 )
 
 KORB_NAMEN = ("screener", "divergenz", "kontrolle", "benchmark")
@@ -405,13 +409,54 @@ def cmd_snapshot(args) -> None:
     print(f"Snapshot {heute.isoformat()}: {n} Auto-Eintraege (aktion=auto, Horizont 12M).")
 
 
+def _max_filing_datum(con: sqlite3.Connection, ticker: str) -> str:
+    """v56 Look-ahead: juengstes filing_datum der 13F-Positionen eines Tickers
+    (die verwendeten Smart-Money-Signale); '' wenn keine DB/Tabelle/Positionen."""
+    tabs = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "smart_money_positions" not in tabs:
+        return ""
+    r = con.execute(
+        "SELECT MAX(filing_datum) FROM smart_money_positions WHERE ticker=?",
+        (ticker.upper(),)).fetchone()
+    return (r[0] or "")[:10] if r and r[0] else ""
+
+
+def _kurs_am(con: sqlite3.Connection, ticker: str, wann: date) -> tuple[float | None, str]:
+    """v56: Kurs am Snapshot-Tag `wann` aus prices (exakt, sonst naechster frueherer
+    Tag) -> (kurs, kurs_datum); (None, "") wenn keine prices-Tabelle/Daten."""
+    tabs = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "prices" not in tabs:
+        return None, ""
+    r = con.execute(
+        "SELECT kurs, datum FROM prices WHERE ticker=? AND datum<=? ORDER BY datum DESC LIMIT 1",
+        (ticker.upper(), wann.isoformat())).fetchone()
+    if r and r[0] is not None:
+        return float(r[0]), (r[1] or "")[:10]
+    return None, ""
+
+
+def _start_datum(datum: str, ticker: str, con: sqlite3.Connection) -> str:
+    """v56: Startdatum der Rendite je Zeile = max(Snapshot-Datum, juengstes
+    filing_datum der verwendeten 13F-Signale des Tickers)."""
+    fd = _max_filing_datum(con, ticker)
+    return max(datum, fd) if fd else datum
+
+
 def _snapshot_koerbe(args, cfg: dict, con: sqlite3.Connection) -> None:
-    """v52: snapshot --korb all|screener|divergenz|kontrolle|benchmark [--datum ...].
-    Schreibt je Ticker und Korb eine Zeile (aktion=auto). Idempotent je
-    (ticker, korb, datum): vorhandene Zeilen werden uebersprungen, nie ueberschrieben."""
+    """v52/v56: snapshot --korb all|screener|divergenz|kontrolle|benchmark [--datum ...]
+    (Default --datum = heute = Tag des Snapshots). Schreibt je Ticker und Korb eine
+    Zeile (aktion=auto). Idempotent je (ticker, korb, datum): vorhandene Zeilen werden
+    uebersprungen, nie ueberschrieben.
+
+    v56 Look-ahead: Startkurs = Kurs am Snapshot-Tag (aus prices, Datum <= --datum;
+    Fallback ranking-Kurs). Liegt --datum vor dem filing_datum eines verwendeten
+    13F-Signals, bricht der Lauf VOR dem Schreiben ab ("Datum liegt vor
+    Veroeffentlichung der Signale (Look-ahead)"). start_datum je Zeile =
+    max(--datum, juengstes filing_datum)."""
     korb_arg = args.korb
     datum = (_parse_date(args.datum).isoformat() if getattr(args, "datum", None)
              else _heute().isoformat())
+    datum_d = _parse_date(datum)
     overlap = getattr(args, "overlap", None) or (
         "smart_money_overlap.csv" if Path("smart_money_overlap.csv").exists() else None)
     live = getattr(args, "live", None) or (
@@ -422,13 +467,30 @@ def _snapshot_koerbe(args, cfg: dict, con: sqlite3.Connection) -> None:
         sys.exit(1)
     koerbe_map = koerbe(cfg, rows)
     namen = list(KORB_NAMEN) if korb_arg == "all" else [korb_arg]
+    # Look-ahead-Guard: --datum vor filing_datum verwendeter Signale -> Abbruch vor dem Schreiben
+    offenders = []
+    for name in namen:
+        for r in koerbe_map.get(name, []):
+            fd = _max_filing_datum(con, r["ticker"])
+            if fd and datum_d < _parse_date(fd):
+                offenders.append(f"{r['ticker']} (filing_datum {fd} > datum {datum})")
+    if offenders:
+        raise SystemExit(
+            "Datum liegt vor Veröffentlichung der Signale (Look-ahead): "
+            + "; ".join(offenders[:10]) + (" ..." if len(offenders) > 10 else "")
+            + f" -- --datum muss >= filing_datum der verwendeten 13F liegen (Default: heute={_heute().isoformat()}); "
+              "nichts geschrieben.")
     gew = _default_gewichte(cfg)
     total_w = total_s = 0
     for name in namen:
         w = s = 0
         for r in koerbe_map.get(name, []):
             t = r["ticker"]
-            kurs = _f(r, "kurs")
+            # Startkurs = Kurs am Snapshot-Tag (prices), Fallback ranking-Kurs
+            kurs, kurs_datum = _kurs_am(con, t, datum_d)
+            if kurs is None:
+                kurs = _f(r, "kurs")
+                kurs_datum = str(r.get("kurs_datum") or "")
             if kurs != kurs or kurs <= 0:
                 continue  # kein Kurs -> keine Zeile (kurs ist NOT NULL)
             exists = con.execute(
@@ -437,6 +499,7 @@ def _snapshot_koerbe(args, cfg: dict, con: sqlite3.Connection) -> None:
             if exists:
                 s += 1
                 continue  # idempotent: geschriebene Zeilen nie ueberschreiben
+            start_datum = _start_datum(datum, t, con)
             ew = erwartungswert_pct(_f(r, "iv_bear"), _f(r, "iv_base"), _f(r, "iv_bull"),
                                     kurs, gew)
             con.execute(
@@ -446,9 +509,9 @@ def _snapshot_koerbe(args, cfg: dict, con: sqlite3.Connection) -> None:
                     timing_status, smart_money_score, urteil, divergenz_stufe,
                     fonds_kaeufer, fonds_verkaeufer,
                     gew_bear, gew_base, gew_bull, erwartungswert_pct, wahrscheinlichkeit_p,
-                    horizont_monate, thesis, break_condition)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (t, datum, "auto", name, kurs, str(r.get("kurs_datum") or ""), _status(r),
+                    start_datum, horizont_monate, thesis, break_condition)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (t, datum, "auto", name, kurs, kurs_datum, _status(r),
                  _f(r, "quality"), _f(r, "mos_min", "mos_rule", "margin_of_safety"),
                  _f(r, "mos_robust"), _f(r, "iv_base"), _f(r, "iv_bear"), _f(r, "iv_bull"),
                  _f(r, "kaufzone_kurs"), str(r.get("timing_status") or ""),
@@ -458,14 +521,15 @@ def _snapshot_koerbe(args, cfg: dict, con: sqlite3.Connection) -> None:
                  str(r.get("fonds_kaeufer") or ""), str(r.get("fonds_verkaeufer") or ""),
                  gew["bear"], gew["base"], gew["bull"], ew,
                  (ew / 100.0 if ew == ew else None),
-                 12, f"auto-Snapshot Korb {name}", ""))
+                 start_datum, 12, f"auto-Snapshot Korb {name}", ""))
             w += 1
         print(f"Korb {name}: {w} geschrieben, {s} bereits vorhanden (datum={datum}).")
         total_w += w
         total_s += s
     con.commit()
     print(f"Snapshot {datum} --korb {korb_arg}: {total_w} Zeilen geschrieben, "
-          f"{total_s} uebersprungen (idempotent je ticker/korb/datum).")
+          f"{total_s} uebersprungen (idempotent je ticker/korb/datum). Startkurs = Kurs am "
+          f"Snapshot-Tag; start_datum = max(datum, juengstes filing_datum).")
 
 
 # --------------------------------------------------------------------------
@@ -519,9 +583,17 @@ def _korb_review(con: sqlite3.Connection, cfg: dict, heute: date,
         rends: list[float] = []
         briers: list[float] = []
         for r in grp:
-            kn = _kurs_nach(con, r["ticker"], _parse_date(datum) + timedelta(days=30 * h))
-            if kn == kn and kn > 0 and r["kurs"] and r["kurs"] > 0:
-                rends.append(kn / r["kurs"] - 1.0)
+            # v56: Start je Zeile = max(datum, juengstes filing_datum), Startkurs = Kurs daran
+            sd = ((r["start_datum"] or "")[:10]) or _start_datum(r["datum"], r["ticker"], con)
+            start_d = _parse_date(sd)
+            start_kurs = r["kurs"]
+            if start_d > _parse_date(r["datum"]):
+                k_am, _kd = _kurs_am(con, r["ticker"], start_d)
+                if k_am is not None:
+                    start_kurs = k_am
+            kn = _kurs_nach(con, r["ticker"], start_d + timedelta(days=30 * h))
+            if kn == kn and kn > 0 and start_kurs and start_kurs > 0:
+                rends.append(kn / start_kurs - 1.0)
             if h == 12 and r["brier"] is not None:
                 briers.append(float(r["brier"]))
         n = len(rends)
@@ -585,13 +657,22 @@ def cmd_review(args) -> None:
     n_reviewed = 0
     for r in rows:
         d0 = _parse_date(r["datum"])
-        wann = d0 + timedelta(days=30 * r["horizont_monate"])  # 12/24 Monate
+        # v56 Look-ahead: Startdatum der Rendite = max(Snapshot-Datum, juengstes
+        # filing_datum der verwendeten 13F); Startkurs = Kurs an diesem Tag
+        sd = ((r["start_datum"] or "")[:10]) or _start_datum(r["datum"], r["ticker"], con)
+        start_d = _parse_date(sd)
+        start_kurs = r["kurs"]
+        if start_d > d0:
+            k_am, _kd = _kurs_am(con, r["ticker"], start_d)
+            if k_am is not None:
+                start_kurs = k_am
+        wann = start_d + timedelta(days=30 * r["horizont_monate"])  # 12/24 Monate
         if wann > heute:
             continue  # Horizont noch nicht abgelaufen
         kurs_nach = _kurs_nach(con, r["ticker"], wann)
         if kurs_nach != kurs_nach or kurs_nach <= 0:
             continue  # kein Kurs verfuegbar -> ueberspringen
-        rendite = kurs_nach / r["kurs"] - 1.0
+        rendite = kurs_nach / start_kurs - 1.0
         # Ereignis E nur fuer 12-Monats-Horizont definiert (Rendite nach 12 M >= +10 %)
         if r["horizont_monate"] == 12:
             e = 1 if rendite >= ereignis_schwelle else 0

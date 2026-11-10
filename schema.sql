@@ -104,7 +104,9 @@ CREATE TABLE IF NOT EXISTS decisions (
     divergenz_stufe TEXT,                      -- stark|schwach|- (v51)
     fonds_kaeufer   TEXT,
     fonds_verkaeufer TEXT,
-    wahrscheinlichkeit_p REAL                   -- p = erwartungswert_pct/100 (Rendite >= +10 % in 12 M)
+    wahrscheinlichkeit_p REAL,                  -- p = erwartungswert_pct/100 (Rendite >= +10 % in 12 M)
+    start_datum     TEXT                        -- v56 Look-ahead: Startdatum der Rendite je Zeile =
+                                                -- max(Snapshot-Datum, juengstes filing_datum der verwendeten 13F)
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_ticker ON decisions (ticker);
 -- Idempotenz der Korb-Snapshots: (ticker, korb, datum) eindeutig -- geschriebene

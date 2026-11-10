@@ -70,13 +70,15 @@ Koerbe (config `decisions.baskets`): `screener` (alle Kandidat/Beobachtung), `di
 (15 per Zufall, Seed 42, Status nein + SM-Score 1 + ohne Fondsaktivitaet), `benchmark`
 (SPY, RSP).
 
-**Nach jedem neuen 13F-Quartal** (`smart_money.py fetch`) Snapshot mit Datum des Quartals:
+**Nach jedem neuen 13F-Quartal** (`smart_money.py fetch`) Snapshot -- das Snapshot-Datum ist der **Tag des Snapshots** (Default `--datum` = heute), nicht das Quartalsende:
 
 ```bash
-python decisions.py snapshot --korb all --datum <Datum des 13F-Quartals> \
-    [--ranking ranking.csv] [--overlap smart_money_overlap.csv] [--live watchlist_live.csv]
+python decisions.py snapshot --korb all \
+    [--datum YYYY-MM-DD] [--ranking ranking.csv] [--overlap smart_money_overlap.csv] [--live watchlist_live.csv]
 python decisions.py review [--heute YYYY-MM-DD]     # -> decisions_review.csv
 ```
+
+Look-ahead-Schutz (v56): Startkurs je Zeile = Kurs am Snapshot-Tag (aus `prices`); Startdatum der Rendite = `max(Snapshot-Datum, juengstes filing_datum der verwendeten 13F)` (Spalte `start_datum`). Liegt `--datum` vor dem filing_datum eines verwendeten Signals, bricht `snapshot` vor dem Schreiben ab: "Datum liegt vor Veröffentlichung der Signale (Look-ahead)".
 
 Snapshot schreibt je Ticker und Korb eine Zeile (aktion=auto, Kurs, Status, Quality, MoS,
 iv_bear/base/bull, kaufzone_kurs, timing_status, Smart-Money-Felder, Szenariogewichte
