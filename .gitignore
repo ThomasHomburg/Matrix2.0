@@ -11,5 +11,6 @@ ranking_*.csv
 smart_money_overlap*.csv
 decisions_review.csv
 trend_overlay.csv
+rationale_worklist.csv
 sec_test.py
 debug_fetch*.py

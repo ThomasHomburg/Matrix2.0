@@ -49,6 +49,7 @@ python smart_money.py score TICKER [TICKER ...] [--db ...] [--force]
 python smart_money.py score --ranking ranking.csv [--db ...] [--force]
 python smart_money.py overlap --ranking ranking.csv --watch ticker_watch_v40.csv [--out smart_money_overlap.csv] [--db ...] [--force]
 python smart_money.py rationale-template [--out rationale_import.csv] [--db ...]
+python smart_money.py rationale-worklist [--db ...]   # -> rationale_worklist.csv (v55)
 python smart_money.py rationale-import rationale_import.csv [--db ...]
 python smart_money.py ciks [--db ...]        # CIK-Aufloesung + Filer-Status
 python smart_money.py show TICKER | show --fonds FONDS [--db ...]
@@ -58,6 +59,7 @@ python smart_money.py show TICKER | show --fonds FONDS [--db ...]
 - **Vollstaendigkeitsschutz**: score/overlap brechen ab, wenn die neueste Periode eines Fonds > 140 Tage alt ist oder in den letzten 4 Perioden eine fehlt; `--force` uebersteuert ausschliesslich diesen Abbruch (Warnzeile je blockiertem Fonds im Log; Ergebnis-CSV wird erst am Ende geschrieben und bleibt bei Abbruch unberuehrt).
 - **ETF-Bereinigung**: ETF/Index-Positionen (cusip_map.is_etf bzw. `smart_money.etf_ticker`) bleiben in der CSV sichtbar, werden aber nicht gescored (Score 1, Urteil neutral, Spalte `etf=ja`).
 - **Rationale fuer Score 4**: `rationale-template` schreibt eine Import-Vorlage mit allen Score-4-Kandidaten; `rationale-import` bricht bei fehlendem text/quelle_url mit Zeilennummer ab (atomar); Duplikate (ticker, fonds, quelle_url) werden ueberschrieben; die Quelle erscheint als Spalte `rationale_quelle` in der overlap-CSV. Aktueller Entwurf liegt in `rationale_import.csv` (jede Zeile mit [ENTWURF] zur Pruefung).
+- **Arbeitsliste (v55)**: `rationale-worklist` erzeugt `rationale_worklist.csv` aus `rationale_import.csv` -- angereichert um aktion, periode, filing_datum und edgar_link aus der DB (CIK ohne fuehrende Nullen, Accession ohne Bindestriche) sowie einen suchhinweis je Fonds (config `smart_money.rationale_suchhinweise`; Berkshire = Aktionaersbrief/Hauptversammlung, Pershing Square = Quartals-/Jahresbrief, Starboard/Elliott = 13D "Purpose of Transaction"). text/quelle_url/geprueft bleiben leer (keine erzeugten Begruendungen; `rationale-import` verlangt sie weiterhin). Sortiert nach Naehe zu Score 4.
 - **Signalqualitaet (v51)**: Aktionen werden ueber CUSIP verglichen (kein falsches "neu" bei Mapping-Luecke im Vorquartal; fehlendes Vorquartals-Filing -> Aktion "unbekannt"). `rules.aktion_max_alter_tage` (Default 200): zu alte Aktionen zaehlen nicht fuer Score/Urteil, bleiben aber in der CSV (`aktion_alter_tage`). Urteil "gemischt" bei Kauf + Verkauf durch Fonds mit Gewicht > 0 im selben Quartal. Neue Spalten `divergenz_stufe` (stark|schwach|- nach `rules.divergenz`: stark nur bei Score >= 3 bzw. Score >= 2 + Quality >= 60 UND MoS-Min > -100 %) und `signal_hinweis` (z. B. "13F 2026-Q2, 87 Tage alt, 3 Fonds"). Zaehlung der Divergenz-Stufen in der overlap-Ausgabe (Ziel: <= 15 % stark).
 
 ## Entscheidungslog mit Vergleichkoerben (decisions.py, SQLite value_tracker.db)
