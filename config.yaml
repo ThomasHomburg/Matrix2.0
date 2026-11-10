@@ -466,6 +466,13 @@ smart_money:
   etf_ticker: [SPY, IWM, EEM, SGOV, ACWI, ACWX, IJH, IJR, IWN, IWR, ITA, IGF, IEUR, INDA, EUFN, ESGD, IWD, MBB, HYG, ARGT, EFA, QNT]
   googl_merge: {GOOGL: GOOG}     ## gleiche Aktie je Fonds zusammenfassen
   rationale_csv: "rationale_import.csv" ## Pflichtfeld quelle_url beim Import
+  # Suchhinweise je Fonds fuer rationale-worklist (Arbeitsliste, text/quelle_url bleiben leer)
+  rationale_suchhinweise:
+    "Berkshire Hathaway": "Aktionärsbrief und Hauptversammlung"
+    "Pershing Square Capital Management": "Quartals-/Jahresbrief"
+    "Starboard Value": "13D \"Purpose of Transaction\""
+    "Elliott Investment Management": "13D \"Purpose of Transaction\""
+    "_default": "Presse/Interviews/Statement des Fondsmanagements"
   rules:
     ein_fonds_anteil_max: 0.02   ## Score 2: ein Fonds (neu/erhoeht), Anteil < 2 %
     gewicht_summe_min: 2.0       ## Score 3: Summe Gewicht der Fonds mit neu/erhoeht >= 2,0

@@ -1561,6 +1561,89 @@ def score4_kandidaten(con: sqlite3.Connection, cfg: dict,
     return out
 
 
+def _naehe_zu_score4(con: sqlite3.Connection, cfg: dict, ticker: str, fonds: str) -> int:
+    """Rang fuer rationale-worklist (Sortierung nach Naehe zu Score 4):
+    0 = (ticker, fonds) ist Score-4-Kandidat (cond3 in 2 aufeinanderfolgenden
+    Quartalen, siehe score4_kandidaten); 1 = cond3 im letzten Quartal;
+    2 = sonst (Score 1-2)."""
+    kands = {(r["ticker"], r["fonds"]) for r in score4_kandidaten(con, cfg)}
+    if (ticker.upper(), fonds) in kands:
+        return 0
+    rows = _rows_for(con, ticker)
+    if rows:
+        rules = cfg.get("smart_money", {}).get("rules", {})
+        gew_min = float(rules.get("gewicht_summe_min", 2.0))
+        anteil_g1_min = float(rules.get("anteil_gewicht1_min", 0.05))
+        quarters = sorted({r["periode"] for r in rows})
+        last = [r for r in rows if r["periode"] == quarters[-1]
+                and r["aktion"] not in ("basis", "unbekannt")]
+        kaeufer = {r["fonds"] for r in last
+                   if r["aktion"] in ("neu", "erhoeht") and _fonds_gewicht(cfg, r["fonds"]) > 0}
+        gew = sum(_fonds_gewicht(cfg, f) for f in kaeufer)
+        g1 = [r["anteil_portfolio"] or 0.0 for r in last
+              if r["fonds"] in kaeufer and _fonds_gewicht(cfg, r["fonds"]) == 1.0]
+        if gew >= gew_min or (max(g1) if g1 else 0.0) >= anteil_g1_min:
+            return 1
+    return 2
+
+
+def write_rationale_worklist(con: sqlite3.Connection, cfg: dict, in_csv: str,
+                             out_path: str) -> int:
+    """rationale-worklist: Arbeitsliste aus rationale_import.csv (ticker, fonds) --
+    angereichert aus der DB (aktion, periode, filing_datum, edgar_link aus CIK +
+    Accession) und suchhinweis je Fonds (config smart_money.rationale_suchhinweise).
+    text/quelle_url/geprueft bleiben LEER (rationale-import verlangt sie weiterhin als
+    Pflicht -- es werden keine Begruendungen erzeugt). Sortiert nach Naehe zu Score 4.
+    Rueckgabe: Anzahl Zeilen."""
+    sm = cfg.get("smart_money", {})
+    hinweise = sm.get("rationale_suchhinweise", {}) or {}
+    default_hinweis = hinweise.get("_default", "")
+    funds = {f.get("name"): f for f in sm.get("funds", [])}
+    con.row_factory = sqlite3.Row
+    rows_in: list[tuple[str, str]] = []
+    with open(in_csv, newline="", encoding="utf-8") as f:
+        # fuehrende #-Kommentarzeilen (z. B. ENTWURF-Hinweis in rationale_import.csv)
+        # vor dem Header ueberspringen
+        clean = (l for l in f if not l.lstrip().startswith("#"))
+        for r in csv.DictReader(clean):
+            t = (r.get("ticker") or "").strip().upper()
+            fd = (r.get("fonds") or "").strip()
+            if t:
+                rows_in.append((t, fd))
+    out = []
+    for t, fonds in rows_in:
+        row = con.execute(
+            "SELECT aktion, periode, filing_datum, accession FROM smart_money_positions "
+            "WHERE ticker=? AND fonds=? ORDER BY periode DESC, id DESC LIMIT 1",
+            (t, fonds)).fetchone()
+        if row:
+            aktion = row["aktion"] or ""
+            periode = row["periode"] or ""
+            filing_datum = row["filing_datum"] or ""
+            accession = row["accession"] or ""
+        else:
+            aktion = periode = filing_datum = accession = ""
+        cik = str((funds.get(fonds) or {}).get("cik", "") or "")
+        edgar_link = ""
+        if cik and accession:
+            # CIK ohne fuehrende Nullen + Accession ohne Bindestriche (wie im Fetch-Bericht)
+            edgar_link = (f"{_sec_base()}/Archives/edgar/data/"
+                          f"{str(int(cik.lstrip('0') or '0'))}/{_accession_digits(accession)}/")
+        out.append({"rang": _naehe_zu_score4(con, cfg, t, fonds), "ticker": t, "fonds": fonds,
+                    "aktion": aktion, "periode": periode, "filing_datum": filing_datum,
+                    "edgar_link": edgar_link, "suchhinweis": hinweise.get(fonds, default_hinweis),
+                    "text": "", "quelle_url": "", "geprueft": ""})
+    out.sort(key=lambda r: (r["rang"], r["ticker"], r["fonds"]))
+    cols = ["ticker", "fonds", "aktion", "periode", "filing_datum", "edgar_link",
+            "suchhinweis", "text", "quelle_url", "geprueft"]
+    with open(out_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(cols)
+        for r in out:
+            w.writerow([r[c] for c in cols])
+    return len(out)
+
+
 def write_rationale_template(con: sqlite3.Connection, cfg: dict, out_path: str) -> int:
     """Import-CSV-Vorlage schreiben -- Spalten ticker,fonds,text,quelle_url,datum,typ,
     je eine Zeile pro Score-4-Kandidat (ticker, fonds). Pflichtfelder (ticker, fonds, text,
@@ -2041,6 +2124,21 @@ def cmd_rationale_template(args) -> None:
           "python smart_money.py rationale-import")
 
 
+def cmd_rationale_worklist(args) -> None:
+    """rationale-worklist: Arbeitsliste aus rationale_import.csv + DB (aktion, periode,
+    filing_datum, edgar_link) + suchhinweis je Fonds; text/quelle_url/geprueft leer.
+    Sortiert nach Naehe zu Score 4. Kein Netz, keine erzeugten Begruendungen."""
+    cfg = load_config()
+    con = connect(Path(args.db))
+    in_csv = getattr(args, "csv_file", None) or cfg.get("smart_money", {}).get(
+        "rationale_csv", "rationale_import.csv")
+    out = getattr(args, "out", None) or "rationale_worklist.csv"
+    n = write_rationale_worklist(con, cfg, in_csv, out)
+    con.close()
+    print(f"{n} Arbeitslisten-Zeile(n) -> {out} (aus {in_csv}; sortiert nach Naehe zu Score 4; "
+          f"text/quelle_url/geprueft leer -- rationale-import bleibt Pflicht).")
+
+
 def cmd_show(args) -> None:
     con = connect(Path(args.db))
     con.row_factory = sqlite3.Row
@@ -2102,6 +2200,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p_rt.add_argument("--out", default=None,
                       help="Default: config smart_money.rationale_csv (rationale_import.csv)")
     p_rt.set_defaults(func=cmd_rationale_template)
+    p_rw = sub.add_parser("rationale-worklist",
+                          help="Arbeitsliste aus rationale_import.csv + DB schreiben "
+                               "(ticker, fonds, aktion, periode, filing_datum, edgar_link, suchhinweis; "
+                               "text/quelle_url/geprueft leer; sortiert nach Naehe zu Score 4)")
+    p_rw.add_argument("csv_file", nargs="?", default=None,
+                      help="Default: config smart_money.rationale_csv (rationale_import.csv)")
+    p_rw.add_argument("--out", default=None, help="Default: rationale_worklist.csv")
+    p_rw.set_defaults(func=cmd_rationale_worklist)
     p_sh = sub.add_parser("show", help="Positionen eines Tickers oder Perioden je Fonds (--fonds)")
     p_sh.add_argument("ticker", nargs="?", default=None)
     p_sh.add_argument("--fonds", default=None,
@@ -2112,7 +2218,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args(sys.argv[1:])
-    if getattr(args, "cmd", None) in ("rationale-import", "rationale-template"):
+    if getattr(args, "cmd", None) in ("rationale-import", "rationale-template", "rationale-worklist"):
         cfg = load_config()
         if getattr(args, "cmd") == "rationale-import" and not getattr(args, "csv_file", None):
             args.csv_file = cfg.get("smart_money", {}).get("rationale_csv", "rationale_import.csv")
