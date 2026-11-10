@@ -23,12 +23,13 @@ Datenquellen: FMP (US-Ticker, mit Key) bzw. yfinance (alle anderen Suffixe .DE/.
 python3 -m streamlit run app.py
 ```
 
-Oeffnet automatisch http://localhost:8501. Vier Seiten:
+Oeffnet automatisch http://localhost:8501. Fuenf Seiten:
 
 1. **Rangliste** -- sortierbare Tabelle aller Ticker mit Quality/Value/MoS je Startwert-Modus/Status/SEC-Abgleich/Flags; Standard-Sortierung Kaufkandidat zuerst, dann MoS; ausgeschlossene Ticker als eigene Tabelle mit Grund; Filter nach Sektor/Land/Mindest-Score; Quelle (FMP/yfinance) je Ticker sichtbar.
 2. **Scorecard** -- Detail je Ticker: Block-Scores, Kriterien mit Rohwerten, DCF-Tabelle (3 Szenarien, 4 Startwert-Modi, umschaltbare Nettoverschuldung), letzte Quartale mit Stichtag, SEC-EDGAR-Abgleich, Sensitivitaet, Charts.
 3. **Matrix** -- Streudiagramm Quality (x) vs. MoS (y), Farbe nach Status, Ziel-Quadrant hervorgehoben.
 4. **Import** -- eigene Ticker-Liste per CSV (Spalte `ticker`) oder manuell.
+5. **Watchlist Live** (v53) -- liest `value_tracker.db` (watchlist_status, valuations, prices, decisions, smart_money_*), Anzeige ohne Netz, Cache 15 Min. Kopfzeile Datenstand (letzter Kurs, letztes Valuations-Datum, 13F-Periode je Fonds mit Alter in Tagen; Warnung bei Kurs > 3 Tage / Valuation > 100 Tage / 13F > 140 Tage). Sortierbare Tabelle mit Filter Korb/Status/Alarm (ticker, name, korb, status_screener, status_live, kurs, mos_live_min, mos_live_robust, kaufzone_kurs, distanz_pct, timing_status als [POS]/[NEU]/[NEG], smart_money_score, urteil, divergenz_stufe, alarm, wert_veraltet, naechster_earnings). Detail je Ticker: Szenario-Tabelle Bear/Base/Bull je Startwert-Modus mit Erwartungswert, Kurs-vs-Kaufzone-Chart (1 Jahr, Altair), Smart-Money-Block (Positionen je Fonds mit Periode/Aktion/Anteil, Katalysatoren, Rationale mit Quelle), Entscheidungslog, Platzhalter "Trends (folgt)". Schaltflaeche "Live aktualisieren" ruft `live_update.py` auf (Netz, Fortschritt + Fehlerlog; ohne Netz bleibt der letzte Stand in der DB). Export `watchlist_live_export.csv` (ASCII-Spaltennamen). Leere DB/fehlende Tabellen -> Meldung statt Exception.
 
 ## CLI (ohne Browser)
 
@@ -104,6 +105,32 @@ python trends.py show TICKER | --trend NAME
 
 Quellenregister: `sources.yaml` (11 Quellen, seeding in Tabelle `sources`); schemas in `schema.sql` (`sources`, `trends`, `trend_evidence`, `trend_exposure`). Kein Eintrag ohne `quelle_url`.
 
+## Quartals-Routine (Runbook)
+
+Nach jedem neuen 13F-Quartal (Quartalsende), in dieser Reihenfolge:
+
+```bash
+# 1) 13F-HR der Fonds laden (neue Periode in value_tracker.db)
+python smart_money.py fetch
+
+# 2) frischer Screener-Lauf ueber das Universum (ohne Resume)
+python run_ranking.py --tickers tickers_sp500.csv --no-resume
+
+# 3) Smart-Money-Overlap gegen das frische Ranking + Watchlist
+python smart_money.py overlap --ranking ranking_sp500.csv --watch ticker_watch_v40.csv [--force]
+
+# 4) Live-Update: Seite 5 "Watchlist Live" -> "Live aktualisieren"
+#    (oder CLI: python live_update.py --ranking ranking_sp500.csv)
+#    -> Kurse + watchlist_status in value_tracker.db
+
+# 5) Vergleichkoerbe snapshotten -- Datum = Tag des Snapshots (heute);
+#    Look-ahead-Guard: Abbruch, wenn --datum vor dem filing_datum verwendeter 13F-Signale liegt
+python decisions.py snapshot --korb all --datum <heute>
+
+# 6) Review: Kurse nachfuellen, decisions_review.csv (H1-H3, Horizonte 3/6/12/24 Monate)
+python decisions.py review [--heute YYYY-MM-DD]
+```
+
 ## Datenbank (schema.sql)
 
 `value_tracker.db`: `prices`, `valuations`, `watchlist_status`, `decisions` (Screener/Live) sowie `smart_money_positions`, `smart_money_options`, `smart_money_katalysator`, `smart_money_rationale`, `cusip_map` (Smart Money). Wird bei Bedarf automatisch angelegt/migriert.
@@ -115,5 +142,5 @@ python -m compileall .
 python -m pytest          # kein Netz in Tests (Fetcher-Fixtures/Mocks)
 ```
 
-## Status (Stand v50)
-Der Value-Screener ist vollstaendig umgesetzt: Provider-Schnittstelle (FMP/yfinance), Quality/Value-Scoring mit Renormalisierung, Ausschlussfilter, Sektor-Sonderregeln (Banken/Versicherer/REITs/Versorger/Asset Management), DCF mit 3 Szenarien und 4 Startwert-Modi, SEC-EDGAR-Abgleich mit Capex-Pruefstatus und SBC-Fallback, Robustheits-MoS, Streamlit-App (Rangliste, Scorecard, Matrix, Import), Volllauf-CLI mit Batches/Resume, Universumslader S&P 500/STOXX 600. Darauf aufbauend die Live-Schicht: Watchlist-Tracker mit Preis-/Valuations-Historie und Entscheidungslog (decisions.py inkl. Brier-Kalibrierung), Live-Update mit Kaufzonen und Alarmen, Timing-Modul, Smart-Money-Pipeline (13F-Positionen von 10 Fonds inkl. Aktivisten, CUSIP-Mapping ueber cusip_map/OpenFIGI/Name-Match mit US-Composite-Filter, Options- und Katalysator-Erfassung, Vollstaendigkeitsschutz mit --force, Schema-Guard gegen veraltete DB-Schemata, ETF-Bereinigung, Rationale-Import mit Quellenpflicht fuer Score 4). Alles getestet (508 passed, 1 skipped, kein Netz in Tests); smarter Overlap live: 536 Ticker, Filings bis 2026-Q2. Offene Punkte: Pershing Square meldet zuletzt 2026-Q1 (Luecke, per --force mit Warnung toleriert); rationale_import.csv mit 45 Vorlage-Zeilen wartet auf manuelle Befuellung mit echten Quellen (Score 4).
+## Status (Stand v56)
+Der Value-Screener ist vollstaendig umgesetzt: Provider-Schnittstelle (FMP/yfinance), Quality/Value-Scoring mit Renormalisierung, Ausschlussfilter, Sektor-Sonderregeln (Banken/Versicherer/REITs/Versorger/Asset Management), DCF mit 3 Szenarien und 4 Startwert-Modi, SEC-EDGAR-Abgleich mit Capex-Pruefstatus und SBC-Fallback, Robustheits-MoS, Streamlit-App (fuenf Seiten: Rangliste, Scorecard, Matrix, Import, Watchlist Live), Volllauf-CLI mit Batches/Resume, Universumslader S&P 500/STOXX 600. Darauf aufbauend die Live-Schicht: Watchlist-Tracker mit Preis-/Valuations-Historie und Entscheidungslog (decisions.py inkl. Brier-Kalibrierung und Vergleichkoerben), Live-Update mit Kaufzonen und Alarmen, Timing-Modul, Smart-Money-Pipeline (13F-Positionen von 10 Fonds inkl. Aktivisten, CUSIP-Mapping ueber cusip_map/OpenFIGI/Name-Match mit US-Composite-Filter, Options- und Katalysator-Erfassung, Vollstaendigkeitsschutz mit --force, Schema-Guard gegen veraltete DB-Schemata, ETF-Bereinigung, Rationale-Import mit Quellenpflicht fuer Score 4). Ergaenzt: v51 Signalqualitaet (CUSIP-Vergleich, aktion_max_alter_tage, Urteil gemischt, divergenz_stufe, signal_hinweis), v52 Vergleichkoerbe (snapshot --korb, review -> decisions_review.csv, docs/hypothesen.md), v53 Seite 5 Watchlist Live, v54 trends.py Teil A (Quellenregister sources.yaml, CFS/Konvergenz/Divergenz/Ampel, atomare Imports mit quelle_url-Pflicht), v55 rationale-worklist, v56 Look-ahead (Startkurs am Snapshot-Tag, start_datum, Abbruch bei --datum vor filing_datum). Alles getestet (552 passed, 1 skipped, kein Netz in Tests); smarter Overlap live: 536 Ticker, Filings bis 2026-Q2. Offene Punkte: Pershing Square meldet zuletzt 2026-Q1 (Luecke, per --force mit Warnung toleriert); rationale_import.csv mit 45 Vorlage-Zeilen wartet auf manuelle Befuellung mit echten Quellen (Score 4; Arbeitsliste via `rationale-worklist`).
