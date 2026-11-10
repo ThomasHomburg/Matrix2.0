@@ -187,3 +187,62 @@ CREATE TABLE IF NOT EXISTS smart_money_rationale (
 CREATE INDEX IF NOT EXISTS idx_smr_ticker ON smart_money_rationale (ticker);
 -- Duplikat (ticker, fonds, quelle_url) wird per INSERT OR REPLACE ueberschrieben, nicht doppelt angelegt
 CREATE UNIQUE INDEX IF NOT EXISTS idx_smr_unique ON smart_money_rationale (ticker, COALESCE(fonds, ''), quelle_url);
+
+-- Trends (v54, Trend-Layer Teil A: Struktur + Quellenregister + Bewertung) --
+-- Multi-Layer-Foresight-Framework (Masterarbeit): L1 Wissenschaft/Technologie,
+-- L2 Markt/Kapital, L3 Regulierung/Politik, L4 Nachfrage/Cross-Industry.
+CREATE TABLE IF NOT EXISTS sources (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    name                TEXT NOT NULL,          -- z. B. "SEC EDGAR (10-K/10-Q, Form 4)"
+    layer               TEXT NOT NULL,          -- L1 | L2 | L3 | L4
+    vorlauf_monate      REAL,                   -- Vorlauf der Quelle in Monaten (0 = sofort)
+    zugang              TEXT,                   -- offen/API | API-Key | kostenpflichtig | intern
+    kosten              TEXT,                   -- kostenlos | Basis kostenlos | Abo
+    aktualisierung      TEXT,                   -- taeglich | woechentlich | quartalsweise | monatlich | 15-min
+    zuverlaessigkeit    TEXT,                   -- hoch | mittel | niedrig
+    lizenz              TEXT                    -- z. B. public domain, CC0, CC BY, proprietaer
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sources_name ON sources (name);
+
+CREATE TABLE IF NOT EXISTS trends (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,                  -- eindeutiger Trend-Name
+    typ         TEXT,                           -- technologie | markt | regulierung | nachfrage | zyklus | makro
+    richtung    TEXT,                           -- positiv | negativ | gemischt
+    horizont    TEXT,                           -- z. B. 2y | 3y | 5y | 10y
+    status      TEXT NOT NULL DEFAULT 'aktiv'   -- aktiv | beobachten | archiviert
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_trends_name ON trends (name);
+
+-- Belege (Evidence) je Trend und Layer; score 1..4 mit beobachtbarem Beleg.
+-- quelle_url ist Pflicht (kein Eintrag ohne Quelle).
+CREATE TABLE IF NOT EXISTS trend_evidence (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    trend_id        INTEGER NOT NULL REFERENCES trends(id),
+    layer           TEXT NOT NULL,              -- L1 | L2 | L3 | L4
+    score           INTEGER NOT NULL,           -- 1..4
+    beleg_text      TEXT,                       -- beobachtbarer Beleg (was, wann, wie gross)
+    quelle_id       INTEGER REFERENCES sources(id),
+    quelle_url      TEXT NOT NULL,              -- Pflichtfeld (atomarer Import prueft das)
+    beleg_datum     TEXT,                       -- Datum des Belegs (ISO)
+    abruf_datum     TEXT,                       -- Datum des Abrufs (ISO)
+    erfasst_von     TEXT NOT NULL DEFAULT 'manuell'  -- manuell | regel | llm_vorschlag
+);
+CREATE INDEX IF NOT EXISTS idx_te_trend ON trend_evidence (trend_id);
+CREATE INDEX IF NOT EXISTS idx_te_trend_layer ON trend_evidence (trend_id, layer);
+
+-- Exposure je Watchlist-Ticker und Trend (-2..+2); quelle_url Pflicht.
+CREATE TABLE IF NOT EXISTS trend_exposure (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker          TEXT NOT NULL,
+    trend_id        INTEGER NOT NULL REFERENCES trends(id),
+    exposure        INTEGER NOT NULL,           -- -2 .. +2
+    begruendung     TEXT,
+    quelle_url      TEXT NOT NULL,              -- Pflichtfeld
+    datum           TEXT,                       -- ISO-Datum der Einschaetzung
+    erfasst_von     TEXT NOT NULL DEFAULT 'manuell',  -- manuell | regel | llm_vorschlag
+    geprueft        TEXT NOT NULL DEFAULT 'nein'     -- ja | nein
+);
+CREATE INDEX IF NOT EXISTS idx_tx_ticker ON trend_exposure (ticker);
+CREATE INDEX IF NOT EXISTS idx_tx_trend ON trend_exposure (trend_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tx_unique ON trend_exposure (ticker, trend_id);

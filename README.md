@@ -85,6 +85,21 @@ schreibt je Korb/Horizont Mittelwert, Median, Anteil mit Ueberrendite vs. SPY,
 Differenz zu kontrolle, n und Brier-Score von p (bei n < 30: "unkalibriert, n=...")
 als Tabelle und `decisions_review.csv`. Hypothesen (H1-H3) siehe `docs/hypothesen.md`.
 
+## Trend-Layer Teil A (trends.py, v54 -- Struktur/Quellenregister/Bewertung, kein Netzabruf)
+
+Multi-Layer-Foresight-Framework: L1 Wissenschaft/Technologie, L2 Markt/Kapital, L3 Regulierung/Politik, L4 Nachfrage/Cross-Industry. CFS je Trend = gewichteter Mittelwert der neuesten Belege je Layer (`trends.layer_gewichte`; Layer ohne Beleg = n/a, renormalisiert, Abdeckung ausgewiesen); Konvergenz ab 2 Layern mit Score >= 3; Divergenzwarnung bei niedrigem L2 zu hohem L1/L3 (oder umgekehrt). Ampel je Ticker aus exposure x CFS-Stufe: rot bei exposure <= -1 und Stufe vertiefen/handeln, gelb bei monitor, gruen sonst, n/a ohne Exposure.
+
+```bash
+python trends.py import-trends trends_start.csv          # 12 Start-Trends
+python trends.py import-evidence evidence.csv            # quelle_url Pflicht, atomar mit Zeilennummer
+python trends.py import-exposure exposure_template.csv   # Watchlist x Trends (gefuellt)
+python trends.py score                                   # CFS/Stufe/Konvergenz/Divergenz je Trend
+python trends.py overlay --watch ticker_watch_v40.csv --out trend_overlay.csv
+python trends.py show TICKER | --trend NAME
+```
+
+Quellenregister: `sources.yaml` (11 Quellen, seeding in Tabelle `sources`); schemas in `schema.sql` (`sources`, `trends`, `trend_evidence`, `trend_exposure`). Kein Eintrag ohne `quelle_url`.
+
 ## Datenbank (schema.sql)
 
 `value_tracker.db`: `prices`, `valuations`, `watchlist_status`, `decisions` (Screener/Live) sowie `smart_money_positions`, `smart_money_options`, `smart_money_katalysator`, `smart_money_rationale`, `cusip_map` (Smart Money). Wird bei Bedarf automatisch angelegt/migriert.

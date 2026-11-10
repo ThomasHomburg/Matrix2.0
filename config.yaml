@@ -418,6 +418,26 @@ decisions:
   horizonte_monate: [3, 6, 12, 24]  ## Review-Horizonte (30 Tage/Monat)
   review_csv: "decisions_review.csv"
 
+# Trend-Layer (trends.py, v54 Teil A: Struktur + Quellenregister + Bewertung).
+# Multi-Layer-Foresight-Framework: L1 Wissenschaft/Technologie, L2 Markt/Kapital,
+# L3 Regulierung/Politik, L4 Nachfrage/Cross-Industry.
+trends:
+  sources_yaml: "sources.yaml"       ## Quellenregister (Seed fuer Tabelle sources)
+  layer_gewichte: {L1: 0.25, L2: 0.30, L3: 0.25, L4: 0.20}  ## CFS = gewichteter Mittelwert je Layer
+  konvergenz_min_layer: 2           ## Konvergenzprinzip: mind. N unabhaengige Layer mit Score >= konvergenz_min_score
+  konvergenz_min_score: 3
+  cfs_stufen:                       ## Stufe des CFS (gewichteter Mittelwert 1..4)
+    beobachten: [1.0, 1.9]
+    monitor: [2.0, 2.9]
+    vertiefen: [3.0, 3.4]
+    handeln: [3.5, 4.0]             ## ab 3.5
+  ampel_regeln:                     ## Trend-Ampel je Ticker aus exposure x CFS-Stufe
+    rot_exposure_max: -1            ## exposure <= -1 ...
+    rot_stufen: [vertiefen, handeln] ## ... bei Stufe vertiefen/handeln -> rot
+    gelb_stufen: [monitor]           ## Stufe monitor -> gelb; sonst gruen; n/a ohne Exposure
+  erfasst_von_erlaubt: [manuell, regel, llm_vorschlag]
+  overlay_csv: "trend_overlay.csv"  ## Lauf-Artefakt (gitignored)
+
 # Smart Money (13F-HR der Fonds aus SEC EDGAR).
 # funds: je Fonds name/cik/typ/gewicht/positions_soll_max. Bekannte CIKs fest
 # hinterlegt; alle anderen CIKs werden per EDGAR-Firmensuche aufgeloest (nie raten).
