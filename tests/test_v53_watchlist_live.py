@@ -150,13 +150,17 @@ def test_load_live_overview_leere_und_fehlende_db(tmp_path):
     # DB-Datei fehlt komplett
     ov2 = app.load_live_overview(tmp_path / "fehlt.db", cfg, HEUTE)
     assert ov2["error"] and "Keine Datenbank" in ov2["error"]
-    # DB mit fremder Tabelle (fehlende Pflicht-Tabellen)
+    # DB mit fremder Tabelle: v57 ensure_schema legt die fehlenden Tabellen an (kein Fehler mehr)
     db3 = tmp_path / "fremd.db"
     con = sqlite3.connect(db3)
     con.execute("CREATE TABLE foo (x TEXT)")
     con.commit(); con.close()
     ov3 = app.load_live_overview(db3, cfg, HEUTE)
-    assert ov3["error"] and "fehlende Tabellen" in ov3["error"]
+    assert ov3["error"] is None and ov3["rows"] == []
+    con = sqlite3.connect(db3)
+    tabs = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"watchlist_status", "valuations", "prices", "decisions"} <= tabs   # angelegt
+    con.close()
 
 
 # --------------------------------------------------------------------------

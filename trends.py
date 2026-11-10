@@ -36,6 +36,7 @@ from pathlib import Path
 import yaml
 
 from config import load_config
+from db_schema import ensure_schema
 
 logger = logging.getLogger("value_screener.trends")
 
@@ -66,21 +67,13 @@ def _tab_cols(con: sqlite3.Connection, table: str) -> set[str]:
 
 
 def connect(db_path: Path = DB_PATH, cfg: dict | None = None) -> sqlite3.Connection:
-    """DB oeffnen + Schema (schema.sql) + Guard/Migration der Trend-Tabellen:
-    Tabelle existiert, aber Pflichtspalten fehlen -> DROP + neu aus schema.sql
-    (Altzeilen verworfen, Warnung im Log); danach PRAGMA-Assert -- fehlt danach
-    eine Spalte, ist schema.sql veraltet -> sofort RuntimeError (kein Teil-Lauf).
+    """DB oeffnen + zentraler Schema-Guard (v57 ensure_schema): fehlende Tabellen
+    werden angelegt, fehlende Spalten per ALTER ergaenzt -- vorhandene Daten
+    bleiben erhalten (kein DROP mehr). Danach PRAGMA-Assert -- fehlt danach eine
+    Spalte, ist schema.sql veraltet -> sofort RuntimeError (kein Teil-Lauf).
     Anschliessend Quellenregister aus sources.yaml seeden, falls Tabelle leer."""
     con = sqlite3.connect(db_path)
-    for table, cols in TRENDS_TABLES.items():
-        existing = _tab_cols(con, table)
-        if existing and set(cols) - existing:
-            logger.warning("trends: Migration %s -- Pflichtspalten %s fehlen; Tabelle wird "
-                           "verworfen und aus schema.sql neu aufgebaut",
-                           table, ", ".join(sorted(set(cols) - existing)))
-            con.execute(f"DROP TABLE IF EXISTS {table}")
-    con.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
-    con.commit()
+    ensure_schema(con, schema_path=SCHEMA_PATH)   # v57: ALTER statt DROP, Daten bleiben erhalten
     for table, cols in TRENDS_TABLES.items():
         missing = set(cols) - _tab_cols(con, table)
         if missing:

@@ -63,19 +63,18 @@ def test_connect_legt_tabellen_an_und_seeded_sources(tmp_path):
     assert layers == {"L1", "L2", "L3", "L4"}
 
 
-def test_migration_veraltete_tabelle_wird_neu_aufgebaut(tmp_path, caplog):
-    import logging
+def test_migration_veraltete_tabelle_spalten_ergaenzt_daten_bleiben(tmp_path):
+    # v57: ensure_schema ergaenzt fehlende Spalten per ALTER -- Altzeilen bleiben erhalten
     db = tmp_path / "alt.db"
     raw = sqlite3.connect(db)
-    raw.execute("CREATE TABLE trends (id INTEGER PRIMARY KEY, name TEXT)")  # ohne status/...
+    raw.execute("CREATE TABLE trends (id INTEGER PRIMARY KEY, name TEXT)")  # ohne typ/.../status
     raw.execute("INSERT INTO trends VALUES (1, 'alt')")
     raw.commit(); raw.close()
-    with caplog.at_level(logging.WARNING, logger="value_screener.trends"):
-        con = trends.connect(db, _cfg())
-    assert any("Migration trends" in r.getMessage() for r in caplog.records)
+    con = trends.connect(db, _cfg())
     cols = {r[1] for r in con.execute("PRAGMA table_info(trends)")}
     assert {"id", "name", "typ", "richtung", "horizont", "status"} <= cols
-    assert con.execute("SELECT COUNT(*) FROM trends").fetchone()[0] == 0   # Altzeilen verworfen
+    assert con.execute("SELECT COUNT(*) FROM trends").fetchone()[0] == 1   # Zeile erhalten
+    assert con.execute("SELECT name FROM trends").fetchone()[0] == "alt"
 
 
 # --------------------------------------------------------------------------

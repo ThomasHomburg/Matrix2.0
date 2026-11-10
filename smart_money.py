@@ -138,6 +138,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from config import load_config
+from db_schema import ensure_schema
 
 logger = logging.getLogger("value_screener.smart_money")
 
@@ -1078,15 +1079,9 @@ def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
                 "(cusip_map bleibt; Positionen/Optionen per fetch/--reset neu laden)")
     _drop_wenn_veraltet(con, "smart_money_positions", MIGRATION_PFLICHT_SPALTEN, _hinweis)
     _drop_wenn_veraltet(con, "smart_money_options", OPTIONS_PFLICHT_SPALTEN, _hinweis)
-    con.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
-    con.commit()
-    # additive Migration cusip_map.is_etf (ETF-Flag); frische DBs haben die
-    # Spalte schon aus schema.sql, alte DBs bekommen sie per ALTER (Tabelle muss existieren --
-    # bei veralteter schema.sql greift sonst der Schema-Guard unten mit RuntimeError)
-    cols_cm = {r[1] for r in con.execute("PRAGMA table_info(cusip_map)")}
-    if cols_cm and "is_etf" not in cols_cm:
-        con.execute("ALTER TABLE cusip_map ADD COLUMN is_etf INTEGER NOT NULL DEFAULT 0")
-        con.commit()
+    # v57 zentraler Schema-Guard: fehlende Tabellen anlegen, fehlende Spalten per
+    # ALTER ergaenzen (auch cusip_map.is_etf und decisions.korb/start_datum in Alt-DBs)
+    ensure_schema(con, schema_path=SCHEMA_PATH)
     _migrate_positions(con)
     _assert_positions_schema(con)  # Endverifikation nach connect
     return con

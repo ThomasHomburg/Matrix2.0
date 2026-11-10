@@ -46,6 +46,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from config import load_config
+from db_schema import ensure_schema
 
 DB_PATH = Path("value_tracker.db")
 SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
@@ -91,10 +92,10 @@ def _migrate_decisions(con: sqlite3.Connection) -> None:
 
 
 def init_db(db_path: Path = DB_PATH) -> sqlite3.Connection:
-    """Legt value_tracker.db an und fuehrt schema.sql aus (idempotent)."""
+    """Legt value_tracker.db an; ensure_schema gleicht das Schema ab (idempotent)."""
     con = sqlite3.connect(db_path)
-    con.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
-    _migrate_decisions(con)
+    ensure_schema(con, schema_path=SCHEMA_PATH)   # v57 zentraler Schema-Guard
+    _migrate_decisions(con)     # Datenmigration: periode aus report_date relabeln
     con.commit()
     return con
 
@@ -104,6 +105,7 @@ def _connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
         return init_db(db_path)
     con = sqlite3.connect(db_path)
     con.row_factory = sqlite3.Row
+    ensure_schema(con, schema_path=SCHEMA_PATH)   # v57: Alt-DB wird migriert (korb/start_datum per ALTER)
     _migrate_decisions(con)
     return con
 
