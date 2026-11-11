@@ -1392,6 +1392,45 @@ def _live_db_path() -> Path:
                 or "value_tracker.db")
 
 
+def _is_nan(v) -> bool:
+    """v59: None/NaN/ungueltig -> True (nie Exception)."""
+    if v is None:
+        return True
+    try:
+        return float(v) != float(v)
+    except (TypeError, ValueError):
+        return True
+
+
+def _fmt_num(v, dec: int = 2) -> str:
+    """v59: Zahl mit dec Dezimalstellen; None/NaN -> 'n/a'."""
+    if _is_nan(v):
+        return "n/a"
+    return f"{float(v):.{dec}f}"
+
+
+def _fmt_pct(v) -> str:
+    """v59: Anteil als Prozent mit 1 Nachkommastelle; None/NaN -> 'n/a'."""
+    if _is_nan(v):
+        return "n/a"
+    return f"{float(v) * 100:.1f} %"
+
+
+LIVE_NUM2 = ("kurs", "kaufzone_kurs")           # 2 Dezimalstellen
+LIVE_PCT = ("mos_live_min", "mos_live_robust", "distanz_pct")   # Prozent, 1 Nachkommastelle
+
+
+def _fmt_cell(col: str, v) -> str:
+    """v59: Tabellenzelle formatieren; None/NaN -> 'n/a'."""
+    if col in LIVE_NUM2:
+        return _fmt_num(v, 2)
+    if col in LIVE_PCT:
+        return _fmt_pct(v)
+    if col == "smart_money_score" and v is None:
+        return "n/a"
+    return "" if v is None else str(v)
+
+
 def _ascii(s) -> str:
     """ASCII-Variante fuer Drive/Export: Umlaute -> ae/oe/ue/ss (als Escapes, damit
     der Quelltext selbst ASCII bleibt), Rest -> '?'."""
@@ -1445,7 +1484,8 @@ def load_live_overview(db_path: Path, cfg: dict, heute: date) -> dict:
     "fonds_13f": [...], "stale": {"kurs","valuation","13f"}}.
     Fehlende DB oder fehlende Pflicht-Tabellen -> error-Meldung statt Exception."""
     out = {"error": None, "rows": [], "kurs_stand": None, "valuation_stand": None,
-           "fonds_13f": [], "stale": {"kurs": False, "valuation": False, "13f": False}}
+           "fonds_13f": [], "stale": {"kurs": False, "valuation": False, "13f": False},
+           "ohne_bewertung": 0}
     if not db_path.exists():
         out["error"] = (f"Keine Datenbank gefunden: {db_path} -- zuerst live_update.py / "
                         f"decisions.py init ausfuehren (value_tracker.db).")
@@ -1592,6 +1632,8 @@ def load_live_overview(db_path: Path, cfg: dict, heute: date) -> dict:
                 except Exception as exc:
                     logger.warning("smart_money fuer %s nicht verfuegbar: %s", t, exc)
             out["rows"].append(row)
+        # v59: Anzahl Watchlist-Ticker ohne gespeicherte Bewertung (iv_* fehlen)
+        out["ohne_bewertung"] = sum(1 for r in out["rows"] if _is_nan(r.get("iv_base")))
         return out
     except sqlite3.OperationalError as exc:
         # v57: "no such column" etc. -> verstaendliche Meldung statt Exception
@@ -1626,6 +1668,10 @@ def _live_header(overview: dict, cfg: dict) -> None:
         for f in overview.get("fonds_13f") or []:
             alt_txt = f"{f['alter_tage']} Tage alt" if f["alter_tage"] is not None else "Datum unbekannt"
             st.caption(f"{f['fonds']}: {f['periode']} (report {f['report_date'] or '-'}, {alt_txt})")
+    # v59: Anzahl der Watchlist-Ticker ohne gespeicherte Bewertung in der Kopfzeile
+    n_rows = len(overview.get("rows") or [])
+    n_ohne = overview.get("ohne_bewertung") or 0
+    st.caption(f"Watchlist-Ticker: {n_rows} -- ohne gespeicherte Bewertung (iv_*): {n_ohne}")
     stale = overview.get("stale") or {}
     warns = []
     if stale.get("kurs"):
@@ -1673,28 +1719,37 @@ def watchlist_detail(ticker: str, db_path: Path, cfg: dict, heute: date) -> None
 
     st.subheader(f"Detail: {ticker}")
     # --- Szenario-Tabelle je Startwert-Modus + Erwartungswert (decisions.erwartungswert_pct)
-    gew = dec_mod._default_gewichte(cfg)
-    sc_rows = []
-    for m in ("avg3", "latest", "ttm", "ttm_only"):
-        ivb = v.get(f"iv_{m}")
-        mos = (1.0 - kurs / ivb) if (ivb and kurs and ivb > 0) else float("nan")
-        sc_rows.append({"Startwert-Modus": m, "IV Base": ivb, "MoS live (Base)": mos})
-    ew = dec_mod.erwartungswert_pct(v.get("iv_bear"), v.get("iv_base"), v.get("iv_bull"),
-                                    kurs if kurs else float("nan"), gew)
-    sc_rows.append({"Startwert-Modus": "(aktiv: bear/base/bull)",
-                    "IV Base": v.get("iv_base"),
-                    "MoS live (Base)": (1.0 - kurs / v["iv_base"]) if v.get("iv_base") and kurs and v["iv_base"] > 0 else float("nan")})
-    df_sc = pd.DataFrame(sc_rows)
-    e1, e2 = st.columns(2)
-    with e1:
-        st.markdown("**Szenarien je Startwert-Modus** (IV Base + MoS live)")
-        st.dataframe(df_sc, hide_index=True, width="stretch")
-        st.caption(f"IV Bear {v.get('iv_bear')} | IV Bull {v.get('iv_bull')} | Kurs {kurs}")
-    with e2:
-        st.metric("Erwartungswert (p*100)", f"{ew:.1f} %" if ew == ew else "n/a",
-                  f"p = {ew / 100.0:.2f}" if ew == ew else "n/a")
-        st.caption("p = Summe Gewichte der Szenarien mit IV >= 1,10 x Kurs "
-                   "(Rendite >= +10 % in 12 M); Gewichte 25/50/25")
+    # v59: fehlen iv_* -> Meldung statt Szenario-Tabelle; Smart-Money/Chart/Log bleiben nutzbar
+    if all(_is_nan(v.get(k)) for k in ("iv_bear", "iv_base", "iv_bull")):
+        st.info("Keine Bewertung gespeichert. Bitte run_ranking.py und live_update.py "
+                "ausfuehren (liefern valuations mit iv_*).")
+    else:
+        gew = dec_mod._default_gewichte(cfg)
+        sc_rows = []
+        for m in ("avg3", "latest", "ttm", "ttm_only"):
+            ivb = v.get(f"iv_{m}")
+            mos = (1.0 - kurs / ivb) if (not _is_nan(ivb) and not _is_nan(kurs) and ivb > 0) else float("nan")
+            sc_rows.append({"Startwert-Modus": m, "IV Base": ivb, "MoS live (Base)": mos})
+        ew = dec_mod.erwartungswert_pct(v.get("iv_bear"), v.get("iv_base"), v.get("iv_bull"),
+                                        kurs if not _is_nan(kurs) else float("nan"), gew)
+        sc_rows.append({"Startwert-Modus": "(aktiv: bear/base/bull)",
+                        "IV Base": v.get("iv_base"),
+                        "MoS live (Base)": (1.0 - kurs / v["iv_base"]) if (not _is_nan(v.get("iv_base")) and not _is_nan(kurs) and v["iv_base"] > 0) else float("nan")})
+        df_sc = pd.DataFrame(sc_rows)
+        # v59: numerische Zellen formatiert, None/NaN -> "n/a"
+        df_sc["IV Base"] = df_sc["IV Base"].map(lambda x: _fmt_num(x, 2))
+        df_sc["MoS live (Base)"] = df_sc["MoS live (Base)"].map(_fmt_pct)
+        e1, e2 = st.columns(2)
+        with e1:
+            st.markdown("**Szenarien je Startwert-Modus** (IV Base + MoS live)")
+            st.dataframe(df_sc, hide_index=True, width="stretch")
+            st.caption(f"IV Bear {_fmt_num(v.get('iv_bear'), 2)} | IV Bull {_fmt_num(v.get('iv_bull'), 2)} "
+                       f"| Kurs {_fmt_num(kurs, 2)}")
+        with e2:
+            st.metric("Erwartungswert (p*100)", f"{ew:.1f} %" if not _is_nan(ew) else "n/a",
+                      f"p = {ew / 100.0:.2f}" if not _is_nan(ew) else "n/a")
+            st.caption("p = Summe Gewichte der Szenarien mit IV >= 1,10 x Kurs "
+                       "(Rendite >= +10 % in 12 M); Gewichte 25/50/25")
 
     # --- Kurs-vs-Kaufzone-Chart (1 Jahr, Altair)
     hist = []
@@ -1702,6 +1757,7 @@ def watchlist_detail(ticker: str, db_path: Path, cfg: dict, heute: date) -> None
         hist = [dict(r) for r in con.execute(
             "SELECT datum, kurs FROM prices WHERE ticker=? AND datum>=? ORDER BY datum",
             (ticker, (heute - timedelta(days=365)).isoformat()))]
+        hist = [h for h in hist if not _is_nan(h.get("kurs"))]   # v59: None-Kurse raus
     if hist:
         df_p = pd.DataFrame(hist)
         df_p["datum"] = pd.to_datetime(df_p["datum"])
@@ -1822,29 +1878,32 @@ def page_watchlist_live() -> None:
     _live_header(overview, CFG)
 
     rows = overview["rows"]
+    # v59: leerer Korb als Option "(leer)" -- Default filtert nichts raus (alle Ticker)
     koerbe = sorted({r["korb"] for r in rows if r.get("korb")})
+    if any(not r.get("korb") for r in rows):
+        koerbe.append("(leer)")
     statuses = sorted({r["status_live"] for r in rows if r.get("status_live")})
     fc1, fc2, fc3, fc4 = st.columns(4)
     with fc1:
         sel_koerbe = st.multiselect("Korb", koerbe, default=koerbe)
     with fc2:
-        sel_status = st.multiselect("Status live", statuses, default=statuses)
+        sel_status = st.multiselect("Status live", statuses, default=statuses)  # alle inkl. Kandidat
     with fc3:
         alarm_only = st.checkbox("nur Alarm", value=False)
     with fc4:
         sort_key = st.selectbox("Sortieren nach", LIVE_TABLE_COLS, index=0)
         ascending = st.checkbox("aufsteigend", value=False)
 
-    filtered = filter_live_rows(rows, sel_koerbe, sel_status, alarm_only)
+    sel_koerbe_real = ["" if k == "(leer)" else k for k in sel_koerbe]
+    filtered = filter_live_rows(rows, sel_koerbe_real, sel_status, alarm_only)
     filtered = sort_live_rows(filtered, sort_key, ascending)
-    df = pd.DataFrame(filtered, columns=LIVE_TABLE_COLS)
-    st.dataframe(df, hide_index=True, width="stretch", column_config={
-        "kurs": st.column_config.NumberColumn(format="%.2f"),
-        "mos_live_min": st.column_config.NumberColumn(format="%.1%%"),
-        "mos_live_robust": st.column_config.NumberColumn(format="%.1%%"),
-        "kaufzone_kurs": st.column_config.NumberColumn(format="%.2f"),
-        "distanz_pct": st.column_config.NumberColumn(format="%.1%%"),
-    })
+    # v59: Korb-Spalte leer -> Hinweis ueber der Tabelle; Anzeige "n von m Tickern"
+    if rows and all(not r.get("korb") for r in rows):
+        st.info("Snapshot noch nicht gelaufen (Korb-Spalte leer) -- siehe decisions.py snapshot.")
+    st.caption(f"{len(filtered)} von {len(rows)} Tickern")
+    # v59: numerische Zellen formatiert (kurs/kaufzone 2 Dez., MoS/Distanz % mit 1 Nachk., None -> "n/a")
+    df = pd.DataFrame([{c: _fmt_cell(c, r.get(c)) for c in LIVE_TABLE_COLS} for r in filtered])
+    st.dataframe(df, hide_index=True, width="stretch")
     st.download_button("Export watchlist_live_export.csv (ASCII)",
                        data=live_export_csv(filtered),
                        file_name="watchlist_live_export.csv",
