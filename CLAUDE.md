@@ -10,6 +10,7 @@ Tool, das ein Aktienuniversum automatisch nach Qualitaet und Bewertung scort und
 - Versionshistorie: siehe CHANGELOG.md
 
 ## Arbeitsregeln fuer Claude Code
+- Jede Tabelle in schema.sql hat Schema-Guard (ensure_schema in db_schema.py) und einen Test mit Alt-Schema-DB.
 - Immer nur einen Baustein pro Schritt umsetzen, danach Test und kurze Zusammenfassung
 - Keine Magic Numbers: alle Schwellenwerte und Gewichte in `config.yaml`
 - Jede Kennzahl mit Einheit, Waehrung und Berichtsjahr speichern

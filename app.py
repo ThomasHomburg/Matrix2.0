@@ -1453,6 +1453,13 @@ def load_live_overview(db_path: Path, cfg: dict, heute: date) -> dict:
     con = sqlite3.connect(db_path)
     con.row_factory = sqlite3.Row
     try:
+        # v57 zentraler Schema-Guard: Alt-DB (z. B. decisions ohne korb) wird migriert
+        from db_schema import ensure_schema
+        try:
+            ensure_schema(con)
+        except RuntimeError as exc:
+            out["error"] = f"Datenbank-Schema nicht migrierbar -- {exc}"
+            return out
         tables = {r[0] for r in con.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
         missing = {"watchlist_status", "valuations", "prices"} - tables
@@ -1461,6 +1468,20 @@ def load_live_overview(db_path: Path, cfg: dict, heute: date) -> dict:
                             f"{', '.join(sorted(missing))}. Schema anlegen mit "
                             f"`python decisions.py init` (schema.sql).")
             return out
+        # v57: Spalten der verwendeten Abfragen per PRAGMA pruefen -- fehlt etwas,
+        # Meldung statt Exception (uebrige Abschnitte bleiben nutzbar)
+        need = {"decisions": {"ticker", "datum", "korb", "start_datum"},
+                "watchlist_status": {"ticker", "kurs", "status_live"},
+                "valuations": {"ticker", "calc_date", "iv_base"},
+                "prices": {"ticker", "datum", "kurs"}}
+        for tab, cols in need.items():
+            have = {r[1] for r in con.execute(f"PRAGMA table_info({tab})")}
+            miss = cols - have
+            if miss:
+                out["error"] = (f"Datenbank-Schema veraltet ({tab} fehlt: {', '.join(sorted(miss))}) -- "
+                                f"bitte python decisions.py snapshot ausfuehren "
+                                f"(ensure_schema legt fehlende Spalten an).")
+                return out
 
         wcfg = cfg.get("watchlist", {})
         kurs_tage = int(wcfg.get("kurs_veraltet_tage", 3))
@@ -1572,6 +1593,11 @@ def load_live_overview(db_path: Path, cfg: dict, heute: date) -> dict:
                     logger.warning("smart_money fuer %s nicht verfuegbar: %s", t, exc)
             out["rows"].append(row)
         return out
+    except sqlite3.OperationalError as exc:
+        # v57: "no such column" etc. -> verstaendliche Meldung statt Exception
+        out["error"] = (f"Datenbank-Schema veraltet oder unvollstaendig ({exc}) -- bitte "
+                        f"python decisions.py snapshot ausfuehren.")
+        return out
     finally:
         con.close()
 
@@ -1612,20 +1638,37 @@ def _live_header(overview: dict, cfg: dict) -> None:
         st.warning("[!] Veraltete Daten: " + "; ".join(warns))
 
 
+def _require_cols(con: sqlite3.Connection, table: str, cols: tuple[str, ...], what: str) -> bool:
+    """v57: PRAGMA-Pruefung vor einer Abfrage -- fehlen Spalten, Warnung statt
+    Exception; der uebrige Detailbereich bleibt nutzbar."""
+    have = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+    miss = [c for c in cols if c not in have]
+    if miss:
+        st.warning(f"{what}: Datenbank-Schema veraltet ({table} fehlt: {', '.join(miss)}) -- "
+                   f"bitte python decisions.py snapshot ausfuehren; Abschnitt uebersprungen.")
+        return False
+    return True
+
+
 def watchlist_detail(ticker: str, db_path: Path, cfg: dict, heute: date) -> None:
     """Detailbereich je Ticker: Szenario-Tabelle (Bear/Base/Bull je Startwert-Modus
     mit Erwartungswert), Kurs-vs-Kaufzone-Chart (1 Jahr, Altair), Smart-Money-Block,
-    Entscheidungslog, Platzhalter Trends."""
+    Entscheidungslog, Platzhalter Trends. v57: jede Abfrage per PRAGMA gecheckt."""
     import decisions as dec_mod
     import smart_money as sm
     con = sqlite3.connect(db_path)
     con.row_factory = sqlite3.Row
-    v = con.execute(
-        """SELECT * FROM valuations WHERE ticker=? ORDER BY calc_date DESC LIMIT 1""",
-        (ticker,)).fetchone()
-    v = dict(v) if v else {}
-    w = con.execute("SELECT * FROM watchlist_status WHERE ticker=?", (ticker,)).fetchone()
-    w = dict(w) if w else {}
+    v = {}
+    w = {}
+    if _require_cols(con, "valuations", ("ticker", "calc_date", "iv_base", "iv_bear", "iv_bull"),
+                     "Szenarien"):
+        r = con.execute(
+            """SELECT * FROM valuations WHERE ticker=? ORDER BY calc_date DESC LIMIT 1""",
+            (ticker,)).fetchone()
+        v = dict(r) if r else {}
+    if _require_cols(con, "watchlist_status", ("ticker", "kurs", "kaufzone_kurs"), "Live-Status"):
+        r = con.execute("SELECT * FROM watchlist_status WHERE ticker=?", (ticker,)).fetchone()
+        w = dict(r) if r else {}
     kurs = w.get("kurs") or v.get("kurs")
 
     st.subheader(f"Detail: {ticker}")
@@ -1654,9 +1697,11 @@ def watchlist_detail(ticker: str, db_path: Path, cfg: dict, heute: date) -> None
                    "(Rendite >= +10 % in 12 M); Gewichte 25/50/25")
 
     # --- Kurs-vs-Kaufzone-Chart (1 Jahr, Altair)
-    hist = [dict(r) for r in con.execute(
-        "SELECT datum, kurs FROM prices WHERE ticker=? AND datum>=? ORDER BY datum",
-        (ticker, (heute - timedelta(days=365)).isoformat()))]
+    hist = []
+    if _require_cols(con, "prices", ("ticker", "datum", "kurs"), "Chart"):
+        hist = [dict(r) for r in con.execute(
+            "SELECT datum, kurs FROM prices WHERE ticker=? AND datum>=? ORDER BY datum",
+            (ticker, (heute - timedelta(days=365)).isoformat()))]
     if hist:
         df_p = pd.DataFrame(hist)
         df_p["datum"] = pd.to_datetime(df_p["datum"])
@@ -1696,8 +1741,7 @@ def watchlist_detail(ticker: str, db_path: Path, cfg: dict, heute: date) -> None
 
     # --- Entscheidungslog (letzte Eintraege)
     st.markdown("**Entscheidungslog (letzte Eintraege)**")
-    if "decisions" in {r[0] for r in con.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'")}:
+    if _require_cols(con, "decisions", ("ticker", "datum", "korb", "kurs"), "Entscheidungslog"):
         dec_rows = [dict(r) for r in con.execute(
             "SELECT datum, aktion, korb, kurs, kurs_nachher, rendite_pct, ereignis_e, brier, thesis "
             "FROM decisions WHERE ticker=? ORDER BY datum DESC, id DESC LIMIT 10",
@@ -1764,6 +1808,9 @@ def page_watchlist_live() -> None:
     overview = _load_live_cached(str(db_path), heute.isoformat())
     if overview.get("error"):
         st.info(overview["error"])
+        # v57: trotz Schema-Problem bleibt der Live-Update-Button nutzbar
+        if st.button("Live aktualisieren (Netz)"):
+            _run_live_update(db_path)
         return
     if not overview["rows"]:
         st.info("Noch keine Live-Daten in der Datenbank -- 'Live aktualisieren' (Netz) "

@@ -400,7 +400,9 @@ def main() -> None:
     attach_smart_money(out_rows, cfg, db_path=Path(args.db))
     # v53: Live-Stand in die DB schreiben (Seite 5 Watchlist Live liest watchlist_status/prices)
     from decisions import init_db  # lazy import (Schema anlegen, falls DB neu)
+    from db_schema import ensure_schema  # v57 zentraler Schema-Guard
     con = init_db(Path(args.db))
+    ensure_schema(con)
     store_live_status(con, out_rows, prices)
     con.close()
     write_watchlist_csv(out_rows, args.out)
