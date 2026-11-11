@@ -163,15 +163,28 @@ def _vals(row: dict | None) -> dict:
     }
 
 
+def _num(x) -> float:
+    """v59: None/ungueltig -> NaN, nie Exception."""
+    if x is None:
+        return float("nan")
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
 def erwartungswert_pct(iv_bear: float, iv_base: float, iv_bull: float, kurs: float,
                        gew: dict[str, float]) -> float:
     """Erwartungswert in %: p = Summe der Gewichte der Szenarien mit
-    iv >= 1,10 x Kurs; p*100. NaN-Eingaenge zaehlen nicht mit (Gewichtung verfällt)."""
-    if kurs != kurs or kurs <= 0:
+    iv >= 1,10 x Kurs; p*100. v59: None/NaN in iv_* oder kurs -> NaN (n/a),
+    nie eine Exception (frueher TypeError bei None)."""
+    ivs = [_num(iv_bear), _num(iv_base), _num(iv_bull)]
+    k = _num(kurs)
+    if any(v != v for v in ivs) or k != k or k <= 0:
         return float("nan")
     p = 0.0
-    for iv, g in ((iv_bear, gew["bear"]), (iv_base, gew["base"]), (iv_bull, gew["bull"])):
-        if iv == iv and iv >= 1.10 * kurs:
+    for iv, g in zip(ivs, (gew["bear"], gew["base"], gew["bull"])):
+        if iv >= 1.10 * k:
             p += g
     return p * 100.0
 
