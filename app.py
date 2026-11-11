@@ -103,6 +103,7 @@ def _fmt_mos(v: float, le0: bool = False, special: bool = False) -> str:
 # --- Seite 1: Rangliste ------------------------------------------------------
 
 def page_ranking() -> None:
+    ensure_screener_data()   # v58: Live-Lauf nur auf Seite 1-4
     rows = st.session_state["rows"]
     excluded = st.session_state["excluded"]
     source = st.session_state["source"]
@@ -331,6 +332,7 @@ def page_ranking() -> None:
 # --- Seite 2: Scorecard ------------------------------------------------------
 
 def page_scorecard() -> None:
+    ensure_screener_data()   # v58: Live-Lauf nur auf Seite 1-4
     companies = st.session_state["companies"]
     rows = st.session_state["rows"]
     st.header("Scorecard")
@@ -1130,6 +1132,7 @@ def dcf_section(m: TickerMetrics, row: dict | None) -> None:
 # --- Seite 3: Matrix (Quality vs. Value) -------------------------------------
 
 def page_matrix() -> None:
+    ensure_screener_data()   # v58: Live-Lauf nur auf Seite 1-4
     """Streudiagramm Quality (x) vs. MoS Base (y = Minimum der Modi).
 
     Farbe nach Status: Kandidat gruen, Beobachtung blau, sonst grau.
@@ -1266,6 +1269,7 @@ def page_matrix() -> None:
 # --- Seite 4: Import ---------------------------------------------------------
 
 def page_import() -> None:
+    ensure_screener_data()   # v58: Live-Lauf nur auf Seite 1-4
     st.header("Import / manuelle Eingabe")
     st.caption("CSV mit einer Spalte `ticker` (eine Zeile pro Ticker). "
                "US-Ticker -> FMP (FMP_API_KEY noetig), alle anderen (z. B. .DE, .CO) -> yfinance; "
@@ -1362,6 +1366,55 @@ def page_import() -> None:
                 if errors_u:
                     with st.expander(f"Fehlerlog ({len(errors_u)} Ticker)"):
                         st.dataframe(pd.DataFrame(errors_u), width="stretch", hide_index=True)
+
+
+# --- Screener-Daten nur fuer Seite 1-4 (v58; hier im app_part2-Bereich) ---------
+
+@st.cache_data(ttl=900, show_spinner=False)   # 15 Minuten, Schluessel = Ticker-Liste
+def _screener_data_cached(tickers: tuple[str, ...], years: int, imported: bool):
+    """Live-Lauf (Provider FMP/yfinance) + evaluate_all -- gecacht (TTL 15 Min)."""
+    if imported:
+        companies = list(st.session_state.get("imported_companies", []))
+        source, kind = "Import (Seite 3)", "import"
+    else:
+        companies = load_live(tickers, years)
+        if not companies:
+            companies = demo_companies()
+            source, kind = "DEMO-DATEN (Fallback: Live-Laden fehlgeschlagen)", "demo"
+        else:
+            sources = sorted(build_providers(os.environ.get("FMP_API_KEY", "")))
+            label = f"LIVE ({len(tickers)} Ticker, Provider: {', '.join(sources)})"
+            if len(tickers) <= 5:
+                label += "  " + ", ".join(tickers)
+            source, kind = label, "live"
+    rows, excluded = evaluate_all(companies, CFG)
+    return rows, excluded, source, kind, companies
+
+
+def ensure_screener_data() -> None:
+    """Laedt und wertet die Ticker NUR fuer die Seiten 1-4 (Rangliste, Scorecard,
+    Matrix, Import) -- nicht fuer Seite 5 (Watchlist Live liest nur value_tracker.db).
+    Ergebnis in st.session_state; Cache st.cache_data TTL 15 Min mit Schluessel =
+    Ticker-Liste -- wiederholte Seitenwechsel starten den Lauf nicht neu."""
+    imported = "imported_companies" in st.session_state
+    tickers = tuple(st.session_state.get("live_tickers") or load_ticker_file("tickers.csv") or ["AAPL"])
+    key = (tickers, CFG["data"]["years"], imported)
+    if st.session_state.get("_screener_key") == key and "rows" in st.session_state:
+        return  # bereits geladen -- kein neuer Lauf
+    if imported:
+        label = "Import (Seite 3)"
+    else:
+        sources = sorted(build_providers(os.environ.get("FMP_API_KEY", "")))
+        label = f"LIVE ({len(tickers)} Ticker, Provider: {', '.join(sources)})"
+    with st.spinner(f"Werte Ticker aus ({label}) ..."):
+        rows, excluded, source, kind, companies = _screener_data_cached(
+            tickers, CFG["data"]["years"], imported)
+    st.session_state["companies"] = companies
+    st.session_state["rows"] = rows
+    st.session_state["excluded"] = excluded
+    st.session_state["source"] = source
+    st.session_state["source_kind"] = kind
+    st.session_state["_screener_key"] = key
 
 
 # --- Seite 5: Watchlist Live ---------------------------------------------------
@@ -1927,14 +1980,9 @@ def main() -> None:
     st.title(":material/trending_up: Value-Screener")
     st.caption("Qualitaets- und Bewertungs-Screening (Buffett-Ansatz) – Einheiten konsistent in absoluten Betraegen")
 
-    companies, source, source_kind = get_companies()
-    with st.spinner(f"Werte Ticker aus ({source}) …"):
-        rows, excluded = evaluate_all(companies, CFG)
-    st.session_state["companies"] = companies
-    st.session_state["rows"] = rows
-    st.session_state["excluded"] = excluded
-    st.session_state["source"] = source
-    st.session_state["source_kind"] = source_kind
+    # v58: Live-Lauf (get_companies + evaluate_all) startet nicht mehr hier auf jeder
+    # Seite -- nur noch in den Seiten 1-4 via ensure_screener_data(). Seite 5
+    # (Watchlist Live) liest ausschliesslich value_tracker.db.
 
     page_ranking_fn = st.Page(page_ranking, title="Rangliste", icon=":material/emoji_events:", default=True)
     page_scorecard_fn = st.Page(page_scorecard, title="Scorecard", icon=":material/table_view:")
