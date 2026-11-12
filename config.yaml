@@ -305,6 +305,9 @@ sanity:
   fcf_margin: [-1.0, 1.0]
   revenue_cagr: [-0.9, 3.0]
   market_cap_over_revenue: [0.01, 1000.0]
+  # v61 Sanity-Guard (Flags in der Rangliste, Anzeige "< -1000 %"; Rohwert bleibt in der CSV)
+  mos_extrem_min: -10.0        ## MoS < -10 (-1000 %) -> Flag "mos:extrem"
+  wert_nahe_null_anteil: 0.01  ## Wert je Aktie < 1 % des Kurses -> Flag "wert:nahe_null"
 
 dcf:
   # Innerer Wert (DCF, 3 Szenarien). Basis: normalisierter FCF nach SBC

@@ -26,6 +26,21 @@ def _fmt_pct(v: float) -> str:
     return "n/a" if math.isnan(v) else f"{v:.2%}"
 
 
+def sanity_mos_flags(mos_v: float, iv_base_v: float, price: float, cfg: dict) -> list[str]:
+    """v61 Sanity-Guard (reine Funktion): MoS < sanity.mos_extrem_min (-10 = -1000 %)
+    -> 'mos:extrem'; Wert je Aktie < sanity.wert_nahe_null_anteil (1 %) des Kurses
+    -> 'wert:nahe_null'. NaN -> kein Flag."""
+    scfg = cfg.get("sanity", {})
+    mos_extrem_min = float(scfg.get("mos_extrem_min", -10.0))
+    wn = float(scfg.get("wert_nahe_null_anteil", 0.01))
+    out = []
+    if mos_v == mos_v and mos_v < mos_extrem_min:
+        out.append("mos:extrem")
+    if iv_base_v == iv_base_v and price == price and price > 0 and iv_base_v < wn * price:
+        out.append("wert:nahe_null")
+    return out
+
+
 def evaluate_ticker(m: TickerMetrics, cfg: dict) -> dict:
     """Wertet einen Ticker aus.
 
@@ -468,6 +483,14 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict) -> dict:
         logger.warning("%s: gemeldete ND weicht um > %.0f%% der Marktkap. von "
                        "Schulden-Cash ab -> Flag 'ND != Schulden - Cash'",
                        m.ticker, float(cfg.get("consistency", {}).get("net_debt_mcap_share", 0.05)) * 100)
+
+    # v61 Sanity-Guard: extreme MoS / Wert je Aktie nahe null (Grenzen aus config sanity)
+    mos_v = dcf.margin_of_safety
+    iv_base_v = (dcf.scenarios["base"].value_per_share
+                 if dcf.scenarios.get("base") else float("nan"))
+    for f in sanity_mos_flags(mos_v, iv_base_v, price, cfg):
+        flag_parts.append(f)
+        logger.warning("%s: %s (MoS=%.6g, iv_base=%.6g, kurs=%.6g)", m.ticker, f, mos_v, iv_base_v, price)
 
     flags = " ".join(dict.fromkeys(flag_parts))  # entdoppeln, Reihenfolge behalten
 

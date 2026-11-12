@@ -87,13 +87,16 @@ def _fmt_pct(v: float) -> str:
     return "n/a" if (v != v) else f"{v:.1%}"
 
 
-def _fmt_mos(v: float, le0: bool = False, special: bool = False) -> str:
+def _fmt_mos(v: float, le0: bool = False, special: bool = False, extrem: bool = False) -> str:
     # Start-FCF <= 0 -> "Start-FCF <= 0" statt n/a
     if le0:
         return "Start-FCF ≤ 0"
     # Sektor-Sonderregel -> DCF nicht berechnet
     if special:
         return "n/a (Sonderregel)"
+    # v61: mos:extrem (MoS < -1000 %) -> "< -1000 %"
+    if extrem and v == v and v < -10.0:
+        return "< −1000 %"
     # MoS unter -100 % -> "< -100 %"
     if v == v and v < -1.0:
         return "< −100 %"
@@ -155,7 +158,8 @@ def page_ranking() -> None:
     view["EV/EBIT rel."] = view["ev_ebit_med"].map(lambda v: "n/a" if math.isnan(v) else f"{v:.1f}")
     view["MoS (Base)"] = view.apply(
         lambda r: _fmt_mos(r["margin_of_safety"], bool(r.get("dcf_fcf_le0", False)),
-                           bool(r.get("sector_special", False))), axis=1)  # Start-FCF <= 0; v35: Sonderregel
+                           bool(r.get("sector_special", False)),
+                           "mos:extrem" in (r.get("flags") or "")), axis=1)  # v61: mos:extrem -> "< -1000 %"
     # MoS bei erhoehtem Diskontsatz (Base, aktiver Modus) -- Robustheit
     _rrate = float(CFG.get("dcf", {}).get("robust_discount_rate", 0.10))
     view[f"MoS bei {_rrate:.0%}"] = view.apply(
