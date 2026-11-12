@@ -91,6 +91,73 @@ def watchlist_tickers(rows: list[dict], cfg: dict) -> list[str]:
     return out
 
 
+def load_watch_file(path: str) -> list[str]:
+    """--watch DATEI: Spalte ticker (wie ticker_watch_v40.csv), dedup, upper."""
+    out: list[str] = []
+    seen: set[str] = set()
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        for r in csv.DictReader(f):
+            t = (r.get("ticker") or "").strip().lstrip("\ufeff").upper()
+            if t and not t.startswith("#") and t not in seen:
+                seen.add(t)
+                out.append(t)
+    return out
+
+
+def korb_tickers(db_path: Path) -> tuple[list[str], str]:
+    """Alle Ticker der Koerbe des letzten decisions-Snapshots (neuestes datum mit
+    korb<>''). Rueckgabe: (ticker, snapshot_datum); ohne DB/leer -> ([], '')."""
+    if not db_path.exists():
+        return [], ""
+    con = sqlite3.connect(db_path)
+    try:
+        tabs = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "decisions" not in tabs:
+            return [], ""
+        cols = {r[1] for r in con.execute("PRAGMA table_info(decisions)")}
+        if "korb" not in cols:
+            return [], ""
+        r = con.execute("SELECT MAX(datum) FROM decisions WHERE korb<>''").fetchone()
+        snap = (r[0] or "") if r else ""
+        if not snap:
+            return [], ""
+        out = []
+        seen = set()
+        for row in con.execute("SELECT DISTINCT ticker FROM decisions WHERE korb<>'' AND datum=?",
+                               (snap,)):
+            t = (row[0] or "").strip().upper()
+            if t and t not in seen:
+                seen.add(t)
+                out.append(t)
+        return out, snap
+    finally:
+        con.close()
+
+
+def watchlist_scope(rows: list[dict], cfg: dict, watch_csv: str | None = None,
+                    db_path: Path = Path("value_tracker.db")) -> tuple[list[str], dict]:
+    """v60: Live-Umfang = Vereinigung aus (1) Kandidat/Beobachtung des --ranking,
+    (2) watchlist.extra_tickers, (3) --watch-Datei, (4) allen Tickern der Koerbe des
+    letzten decisions-Snapshots. Rueckgabe: (ticker_liste, {quelle: anzahl})."""
+    wcfg = cfg.get("watchlist", {})
+    statuses = set(wcfg.get("statuses", ["Kandidat", "Beobachtung", "Beobachtung (nicht normalisiert)"]))
+    ranking = [(r.get("ticker") or "").strip().upper() for r in rows
+               if (r.get("status") or "").strip() in statuses and (r.get("ticker") or "").strip()]
+    extra = [str(t).upper() for t in wcfg.get("extra_tickers", [])]
+    watch = load_watch_file(watch_csv) if watch_csv else []
+    koerbe, snap = korb_tickers(db_path)
+    union: list[str] = []
+    seen: set[str] = set()
+    for t in ranking + extra + watch + koerbe:
+        if t and t not in seen:
+            seen.add(t)
+            union.append(t)
+    quellen = {"ranking": len(ranking), "extra_tickers": len(extra),
+               "watch_datei": len(watch), "decisions_koerbe": len(koerbe)}
+    quellen["snapshot_datum"] = snap
+    return union, quellen
+
+
 def load_ranking_rows(ranking_csv: str) -> list[dict]:
     """Ranking-CSV laden (v41 Export-Spalten als Strings; numerische Felder via _f)."""
     with open(ranking_csv, newline="", encoding="utf-8") as f:
@@ -318,6 +385,81 @@ def write_watchlist_csv(rows: list[dict], out_path: str) -> None:
     logger.info("watchlist_live gespeichert: %s (%d Ticker)", out_path, len(rows))
 
 
+def _yf_history(ticker: str, period: str) -> "pd.Series":
+    """Default-Historie-Fetcher: yfinance Tageskurse (Close) als Series."""
+    import yfinance as yf
+    hist = yf.Ticker(ticker).history(period=period)
+    if hist is None or hist.empty:
+        raise ValueError("keine Kursdaten")
+    return hist["Close"].dropna()
+
+
+def backfill_prices(con: sqlite3.Connection, tickers: list[str], batch: int = 20,
+                    pause: float = 2.0, hist_fetcher=None) -> tuple[int, list[dict]]:
+    """v60: Kurshistorie in prices laden. Erster Lauf je Ticker (kein Datum in
+    prices) -> 2 Jahre Tagesschlusskurse (period='2y'); danach nur neue Tage seit
+    dem letzten gespeicherten Datum (period='5d'). Batch + Fortschritt + Fehlerlog
+    je Ticker (ein Fehler stoppt den Lauf nicht). hist_fetcher: (ticker, period) ->
+    Series -- injizierbar fuer Tests ohne Netz. Rueckgabe: (eingefuegte Zeilen, errors)."""
+    import pandas as pd  # lazy
+    if hist_fetcher is None:
+        hist_fetcher = _yf_history
+    now = datetime.now().isoformat(timespec="seconds")
+    inserted = 0
+    errors: list[dict] = []
+    for start in range(0, len(tickers), max(1, batch)):
+        chunk = tickers[start:start + max(1, batch)]
+        logger.info("Historie-Batch %d-%d von %d", start + 1, start + len(chunk), len(tickers))
+        for t in chunk:
+            try:
+                r = con.execute("SELECT MAX(datum) FROM prices WHERE ticker=?", (t,)).fetchone()
+                last = r[0] if r else None
+                period = "2y" if not last else "5d"   # erst 2 Jahre, dann nur neue Tage
+                closes = hist_fetcher(t, period)
+                if closes is None or len(closes) == 0:
+                    raise ValueError("keine Kursdaten")
+                if not isinstance(closes, pd.Series):
+                    closes = pd.Series(closes)
+                n = 0
+                for d, k in closes.items():
+                    ds = d.date().isoformat() if hasattr(d, "date") else str(d)[:10]
+                    if last and ds <= last:
+                        continue
+                    if k is None or k != k:
+                        continue
+                    con.execute("INSERT OR REPLACE INTO prices (ticker, datum, kurs, quelle, geladen_am)"
+                                " VALUES (?,?,?,'yfinance',?)", (t, ds, float(k), now))
+                    n += 1
+                inserted += n
+                logger.info("%s: %d Kurse (%s, letzter Stand %s -> %s)", t, n, period, last or "neu",
+                            closes.index[-1].date().isoformat() if hasattr(closes.index[-1], "date") else closes.index[-1])
+            except Exception as exc:
+                logger.error("Historie-Fehler bei %s: %s", t, exc)
+                errors.append({"ticker": t, "error": str(exc)[:200]})
+        if start + batch < len(tickers):
+            time.sleep(pause)
+    con.commit()
+    return inserted, errors
+
+
+def timing_from_db(con: sqlite3.Connection, tickers: list[str]) -> dict[str, dict]:
+    """v60: timing_kennzahlen (timing.py) je Ticker aus der prices-Historie in der DB
+    (2y Tagesschlusskurse). Rueckgabe: {ticker: kennzahlen-dict}; Ticker mit < 260
+    Tagen bleiben aussen (n/a)."""
+    import pandas as pd
+    import timing as timing_mod
+    out: dict[str, dict] = {}
+    for t in tickers:
+        rows = con.execute("SELECT datum, kurs FROM prices WHERE ticker=? ORDER BY datum",
+                           (t,)).fetchall()
+        if len(rows) < 260:
+            continue
+        s = pd.Series([float(r[1]) for r in rows],
+                      index=pd.to_datetime([r[0] for r in rows]))
+        out[t] = timing_mod.timing_kennzahlen(s)
+    return out
+
+
 def store_live_status(con: sqlite3.Connection, out_rows: list[dict],
                       prices: dict[str, dict]) -> None:
     """v53: Live-Stand in value_tracker.db persistieren (Seite 5 Watchlist Live
@@ -370,6 +512,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--out", default="watchlist_live.csv", help="Ausgabe-CSV (Default: watchlist_live.csv)")
     p.add_argument("--heute", default=None, help="Referenzdatum YYYY-MM-DD (Default: heute; Tests)")
     p.add_argument("--db", default="value_tracker.db", help="SQLite-DB fuer smart_money-Spalten (v42)")
+    p.add_argument("--watch", default=None,
+                   help="v60: zusaetzliche Watchlist-Datei (Spalte ticker); Umfang = Vereinigung "
+                        "aus Ranking + extra_tickers + --watch + decisions-Koerben (letzter Snapshot)")
     p.add_argument("--batch", type=int, default=20, help="Batch-Groesse fuer Kursabruf")
     p.add_argument("--pause", type=float, default=2.0, help="Pause zwischen Batches in s")
     return p.parse_args(argv)
@@ -383,10 +528,18 @@ def main() -> None:
         print(f"Fehler: Ranking-Datei nicht gefunden: {args.ranking}", file=sys.stderr)
         sys.exit(1)
     rows_in = load_ranking_rows(args.ranking)
-    tickers = watchlist_tickers(rows_in, cfg)
+    # v60: Umfang = Vereinigung aus Ranking + extra_tickers + --watch + decisions-Koerben
+    tickers, quellen = watchlist_scope(rows_in, cfg, watch_csv=args.watch, db_path=Path(args.db))
     if not tickers:
-        print("Fehler: 0 Watchlist-Ticker (watchlist.statuses/extra_tickers pruefen).", file=sys.stderr)
+        print("Fehler: 0 Watchlist-Ticker (watchlist.statuses/extra_tickers/--watch/Koerbe pruefen).",
+              file=sys.stderr)
         sys.exit(1)
+    print("Umfang je Quelle: ranking={ranking}, extra_tickers={extra_tickers}, "
+          "watch_datei={watch_datei}, decisions_koerbe={decisions_koerbe} "
+          "(Snapshot {snapshot_datum}) -> {n} eindeutige Ticker".format(
+              n=len(tickers), **{k: quellen[k] for k in
+                                 ("ranking", "extra_tickers", "watch_datei", "decisions_koerbe",
+                                  "snapshot_datum")}))
     logger.info("Watchlist: %d Ticker (%s)", len(tickers), ", ".join(tickers))
     prices, errors = fetch_prices(tickers, batch=args.batch, pause=args.pause)
     rows_by_t = {(r.get("ticker") or "").strip().upper(): r for r in rows_in}
@@ -398,12 +551,23 @@ def main() -> None:
         out_rows.append(live_row(row, prices[t]["kurs"], cfg, heute=heute,
                                  vorheriger_kurs=prices[t].get("vorheriger", float("nan"))))
     attach_smart_money(out_rows, cfg, db_path=Path(args.db))
-    # v53: Live-Stand in die DB schreiben (Seite 5 Watchlist Live liest watchlist_status/prices)
+    # v53/v57/v60: Live-Stand + Kurshistorie + Timing in die DB schreiben
     from decisions import init_db  # lazy import (Schema anlegen, falls DB neu)
     from db_schema import ensure_schema  # v57 zentraler Schema-Guard
     con = init_db(Path(args.db))
     ensure_schema(con)
-    store_live_status(con, out_rows, prices)
+    # v60: Kurshistorie backfillen (erst 2y, dann nur neue Tage), dann Timing aus prices
+    n_hist, hist_errors = backfill_prices(con, tickers, batch=args.batch, pause=args.pause)
+    errors = errors + hist_errors
+    tim = timing_from_db(con, tickers)
+    for r in out_rows:
+        tk = r["ticker"]
+        if tk in tim:
+            r["timing_status"] = tim[tk]["timing_status"] or ""
+            r["mom_12_1"] = tim[tk]["mom_12_1"]
+            r["abstand_sma200"] = tim[tk]["abstand_sma200"]
+    logger.info("Historie: %d Kurse eingefuegt", n_hist)
+    store_live_status(con, out_rows, prices)   # inkl. timing_status in watchlist_status
     con.close()
     write_watchlist_csv(out_rows, args.out)
     print_table(out_rows)

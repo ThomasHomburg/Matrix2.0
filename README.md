@@ -120,7 +120,8 @@ python run_ranking.py --tickers tickers_sp500.csv --no-resume
 python smart_money.py overlap --ranking ranking_sp500.csv --watch ticker_watch_v40.csv [--force]
 
 # 4) Live-Update: Seite 5 "Watchlist Live" -> "Live aktualisieren"
-#    (oder CLI: python live_update.py --ranking ranking_sp500.csv)
+#    (oder CLI: python live_update.py --ranking ranking_sp500.csv --watch ticker_watch_v40.csv)
+#    -> Umfang = Ranking + extra_tickers + --watch + Koerbe (letzter Snapshot); Kurse + Historie + watchlist_status in die DB
 #    -> Kurse + watchlist_status in value_tracker.db
 
 # 5) Vergleichkoerbe snapshotten -- Datum = Tag des Snapshots (heute);

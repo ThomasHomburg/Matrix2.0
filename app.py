@@ -1749,6 +1749,34 @@ def _require_cols(con: sqlite3.Connection, table: str, cols: tuple[str, ...], wh
     return True
 
 
+def smart_money_block(con: sqlite3.Connection, ticker: str, heute: date) -> tuple[str, list[dict], str]:
+    """v60: Smart-Money-Block Seite 5 -- Daten + Meldung. Rueckgabe (modus, positionen,
+    meldung): 'nicht_geladen' = keine 13F-Daten in der DB; 'keine_halter' = 13F geladen,
+    aber kein Fonds haelt den Titel (mit neuester 13F-Periode); 'halter' = Positionen
+    mit fonds/periode/aktion/anteil_portfolio/alter_tage (heute - filing_datum)."""
+    tabs = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "smart_money_positions" not in tabs:
+        return "nicht_geladen", [], "13F-Daten nicht geladen (python smart_money.py fetch)"
+    if not con.execute("SELECT COUNT(*) FROM smart_money_positions").fetchone()[0]:
+        return "nicht_geladen", [], "13F-Daten nicht geladen (python smart_money.py fetch)"
+    import smart_money as sm
+    pos = sm._rows_for(con, ticker)
+    if not pos:
+        newest = con.execute("SELECT MAX(periode) FROM smart_money_positions").fetchone()[0]
+        return "keine_halter", [], f"Kein Fonds haelt den Titel (13F-Periode {newest or '?'})"
+    rows = []
+    for r in pos:
+        fd = (r.get("filing_datum") or "")[:10]
+        try:
+            alter = (heute - date.fromisoformat(fd)).days if fd else None
+        except ValueError:
+            alter = None
+        rows.append({"fonds": r.get("fonds"), "periode": r.get("periode"),
+                     "aktion": r.get("aktion"), "anteil_portfolio": r.get("anteil_portfolio"),
+                     "alter_tage": alter, "filing_datum": fd})
+    return "halter", rows, ""
+
+
 def watchlist_detail(ticker: str, db_path: Path, cfg: dict, heute: date) -> None:
     """Detailbereich je Ticker: Szenario-Tabelle (Bear/Base/Bull je Startwert-Modus
     mit Erwartungswert), Kurs-vs-Kaufzone-Chart (1 Jahr, Altair), Smart-Money-Block,
@@ -1827,14 +1855,14 @@ def watchlist_detail(ticker: str, db_path: Path, cfg: dict, heute: date) -> None
     st.markdown("**Smart Money**")
     try:
         sm_con = sm.connect(db_path)
-        pos = sm._rows_for(sm_con, ticker)
-        if pos:
-            df_pos = pd.DataFrame([{k: r.get(k) for k in
-                                    ("fonds", "periode", "aktion", "aenderung_pct",
-                                     "anteil_portfolio", "wert", "filing_datum")} for r in pos])
+        # v60: unterscheidet "nicht geladen" vs. "kein Fonds haelt den Titel" vs. Halter
+        modus, pos, meldung = smart_money_block(sm_con, ticker.upper(), heute)
+        if modus == "halter":
+            df_pos = pd.DataFrame(pos)[["fonds", "periode", "aktion", "anteil_portfolio", "alter_tage"]]
+            df_pos["anteil_portfolio"] = df_pos["anteil_portfolio"].map(_fmt_pct)
             st.dataframe(df_pos, hide_index=True, width="stretch")
         else:
-            st.caption("Keine Fonds-Positionen in der DB.")
+            st.caption(meldung)
         kat = sm.katalysatoren(sm_con, ticker)
         if kat:
             st.dataframe(pd.DataFrame(kat), hide_index=True, width="stretch")
