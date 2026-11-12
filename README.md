@@ -105,7 +105,25 @@ python trends.py show TICKER | --trend NAME
 
 Quellenregister: `sources.yaml` (11 Quellen, seeding in Tabelle `sources`); schemas in `schema.sql` (`sources`, `trends`, `trend_evidence`, `trend_exposure`). Kein Eintrag ohne `quelle_url`.
 
-## Quartals-Routine (Runbook)
+## Ein-Kommando-Quartalslauf (quartalslauf.py)
+
+Der komplette Quartalslauf als ein Befehl (fetch -> run_ranking -> overlap -> live_update -> snapshot -> review; jedes bestehende Skript als subprocess, keine duplizierte Logik):
+
+```bash
+python quartalslauf.py run                  # kompletter Lauf
+python quartalslauf.py run --dry-run        # nur geplante Schritte ausgeben, aendert nichts
+python quartalslauf.py run --quartal 2026-Q3  # Frischetest gegen erwartetes Quartal
+```
+
+- Schritte einzeln als Funktionen; Abbruch beim ersten Fehler (bisherige Ergebnisse bleiben im Log).
+- Frischetest: fetch muss eine neue 13F-Periode bringen (neuer als juengste in der DB); sonst Abbruch mit Rueckgabecode 2 ("Filings vermutlich noch nicht verfuegbar").
+- Ranking/Watchlist/Ausgabedatei aus config.yaml (`quartalslauf:`), Ausgabedatei z. B. `ranking_sp500_v62_2026-11-12.csv` (Version + Datum).
+- overlap mit `--force` (Vollstaendigkeits-Schutz bewusst uebersteuert).
+- Nach snapshot automatisches review; am Ende Klartext-Zusammenfassung (Top-Signale, neue/verkaufene Positionen, offene Warnungen wie Fonds-Gaps/ungemappte CUSIPs, Score-Verteilung).
+- Logdatei `logs/quartalslauf_YYYY-MM-DD.log`: jedes Kommando mit Datum-Uhrzeit, Dauer, Rueckgabecode.
+
+## Regelbetrieb (Quartals-Routine, manueller Fallback)
+
 
 Nach jedem neuen 13F-Quartal (Quartalsende), in dieser Reihenfolge:
 
