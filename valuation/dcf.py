@@ -45,7 +45,10 @@ class DcfResult:
     revenue_cagr: float            # Umsatz-CAGR ueber verfuegbare Jahre (Basis-Wachstum)
     discount_rate: float
     terminal_growth: float
-    shares: float                  # verwässerte Aktien, neuestes FY
+    shares: float                  # verwässerte Aktien, neuestes FY  # aktien_dcf (verwässerte Aktien, newestes FY)
+    shares_current: float = float("nan")   # v62: aktien_aktuell = Marktkap. / kurs_boerse
+    kurs_boerse: float = float("nan")      # v62: Boersen-Schlusskurs (m.price)
+    price_basis: str = "fy_diluted"        # v62: dcf.share_basis (current|fy_diluted)
     scenarios: dict[str, DcfScenario] = field(default_factory=dict)
     margin_of_safety: float = float("nan")   # MoS Base = 1 - Kurs / Wert je Aktie (Base)
     is_buy: bool = False           # Kaufkandidat (Quality/MoS/Bear-Regeln, siehe pipeline)
@@ -412,6 +415,20 @@ def compute_dcf(m: TickerMetrics, cfg: dict, fx=None, fcf_mode: str | None = Non
     mcap = m.market_cap
     if mcap is None or mcap.is_na() or mcap.value <= 0:
         return result
+
+    # --- v62 Aktienbasis: share_basis = current|fy_diluted --------------------
+    share_basis = str(dcfg.get("share_basis", "current")).lower()
+    if share_basis not in ("current", "fy_diluted"):
+        share_basis = "current"
+    result.price_basis = share_basis
+    kurs_boerse = float("nan")
+    if m.price is not None and not m.price.is_na() and m.price.value > 0:
+        kurs_boerse = m.price.value
+    result.kurs_boerse = kurs_boerse
+    shares_eff = result.shares
+    if share_basis == "current" and kurs_boerse == kurs_boerse:
+        shares_eff = mcap.value / kurs_boerse
+    result.shares_current = shares_eff
     converter = fx
     if converter is None:
         from data.metrics import _NoFX
@@ -454,15 +471,17 @@ def compute_dcf(m: TickerMetrics, cfg: dict, fx=None, fcf_mode: str | None = Non
                              enterprise_value=nan, value_per_share=nan)
         else:
             sc = _dcf_scenario(name, g5, g_terminal, result.discount_rate, fcf_conv,
-                               result.shares, dcfg, net_debt=nd_conv)
+                               shares_eff, dcfg, net_debt=nd_conv)
         result.scenarios[name] = sc
         result.scenario_growth[name] = g5  # fuer Erklaertext
 
     # --- Margin of Safety (Base) ----------------------------------------------
     base = result.scenarios.get("base")
     price = nan
-    if result.shares == result.shares and result.shares > 0:
-        price = mcap.value / result.shares
+    if share_basis == "current" and kurs_boerse == kurs_boerse and kurs_boerse > 0:
+        price = kurs_boerse                      # v62: Boersen-Kurs
+    elif result.shares == result.shares and result.shares > 0:
+        price = mcap.value / result.shares       # Marktkap.-Basis
     # Start-FCF <= 0 -> MoS in der Berechnung n/a (Base vps ist NaN)
     if (base is not None and not result.fcf_le0
             and base.value_per_share == base.value_per_share and base.value_per_share > 0):

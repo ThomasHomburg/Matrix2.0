@@ -460,6 +460,59 @@ def timing_from_db(con: sqlite3.Connection, tickers: list[str]) -> dict[str, dic
     return out
 
 
+def konsistenz_warnung(ticker: str, mos_live_min: float, mos_rule: float,
+                       max_pp: float = 0.02) -> str | None:
+    """v62 Konsistenz: am Tag des Rankings muessen mos_live_min und mos_rule (Screener)
+    uebereinstimmen; Abweichung > max_pp (2 Prozentpunkte) -> Warnung."""
+    if mos_live_min != mos_live_min or mos_rule != mos_rule:
+        return None
+    diff = abs(mos_live_min - mos_rule)
+    if diff > max_pp:
+        return (f"Konsistenz {ticker}: |mos_live_min - mos_rule| = {diff * 100:.2f} Pp "
+                f"> {max_pp * 100:.0f} Pp (mos_live_min={mos_live_min:.4f}, mos_rule={mos_rule:.4f})")
+    return None
+
+
+def migrate_share_basis(con: sqlite3.Connection, cfg: dict, rows_by_t: dict) -> int:
+    """v62 Altbestand: valuations/decisions ohne aktien_aktuell werden umgerechnet:
+    iv_aktuell = iv_base * kurs_boerse / kurs_marktkap_basis (aus der ranking-Zeile),
+    aktien_aktuell uebernommen, Flag 'umgerechnet' gesetzt. decisions-Zeilen mit datum =
+    config decisions.share_basis_fix.datum bekommen hinweis = share_basis_fix.hinweis.
+    Keine Zeile wird geloescht oder ueberschrieben (nur ergaenzende Spalten)."""
+    fix = cfg.get("decisions", {}).get("share_basis_fix", {}) or {}
+    fix_datum = str(fix.get("datum", "2026-11-11"))
+    hinweis = str(fix.get("hinweis",
+                          "Aktienbasis-Fix: p, EW und Kaufzone ungueltig, Rendite-Start unveraendert"))
+    n = 0
+    for tick, r in rows_by_t.items():
+        kb = _f(r, "kurs_boerse")
+        kmb = _f(r, "kurs_marktkap_basis", "kurs")
+        ak = _f(r, "aktien_aktuell")
+        if kb != kb or kmb != kmb or kb <= 0 or kmb <= 0:
+            continue
+        for table in ("valuations", "decisions"):
+            cols = {x[1] for x in con.execute(f"PRAGMA table_info({table})")}
+            if not {"aktien_aktuell", "iv_base"} <= cols:
+                continue
+            rows = con.execute(
+                f"SELECT rowid, iv_base FROM {table} WHERE ticker=? AND aktien_aktuell IS NULL "
+                f"AND iv_base IS NOT NULL", (tick,)).fetchall()
+            for rowid, iv_base in rows:
+                iv_akt = iv_base * kb / kmb
+                con.execute(
+                    f"UPDATE {table} SET aktien_aktuell=?, iv_aktuell=?, "
+                    f"flags=CASE WHEN flags LIKE '%umgerechnet%' THEN flags "
+                    f"ELSE trim(coalesce(flags,'') || ' umgerechnet') END WHERE rowid=?",
+                    (ak if ak == ak else None, iv_akt, rowid))
+                n += 1
+            if table == "decisions" and "hinweis" in cols:
+                con.execute("UPDATE decisions SET hinweis=? WHERE ticker=? AND datum=? "
+                            "AND (hinweis IS NULL OR hinweis='')",
+                            (hinweis, tick, fix_datum))
+    con.commit()
+    return n
+
+
 def store_live_status(con: sqlite3.Connection, out_rows: list[dict],
                       prices: dict[str, dict]) -> None:
     """v53: Live-Stand in value_tracker.db persistieren (Seite 5 Watchlist Live
@@ -541,15 +594,27 @@ def main() -> None:
                                  ("ranking", "extra_tickers", "watch_datei", "decisions_koerbe",
                                   "snapshot_datum")}))
     logger.info("Watchlist: %d Ticker (%s)", len(tickers), ", ".join(tickers))
-    prices, errors = fetch_prices(tickers, batch=args.batch, pause=args.pause)
+    # v62: Benchmark-Ticker (config decisions.baskets.benchmark) kommen in den Kurs-Batch
+    # (2y Historie in prices), auch wenn sie nicht in der Watchlist stehen
+    bench = [str(x).upper() for x in
+             cfg.get("decisions", {}).get("baskets", {}).get("benchmark", ["SPY", "RSP"])]
+    batch_tickers = list(tickers) + [b for b in bench if b not in tickers]
+    if len(batch_tickers) > len(tickers):
+        print(f"Benchmark im Kurs-Batch: {', '.join(b for b in bench if b not in tickers)}")
+    prices, errors = fetch_prices(batch_tickers, batch=args.batch, pause=args.pause)
     rows_by_t = {(r.get("ticker") or "").strip().upper(): r for r in rows_in}
     out_rows = []
     for t in tickers:
         if t not in prices:
             continue  # Fehler bereits geloggt
         row = rows_by_t.get(t) or {"ticker": t, "status": ""}
-        out_rows.append(live_row(row, prices[t]["kurs"], cfg, heute=heute,
-                                 vorheriger_kurs=prices[t].get("vorheriger", float("nan"))))
+        r2 = live_row(row, prices[t]["kurs"], cfg, heute=heute,
+                      vorheriger_kurs=prices[t].get("vorheriger", float("nan")))
+        out_rows.append(r2)
+        # v62 Konsistenz: live_update warnt bei Abweichung mos_live_min vs mos_rule > 2 Pp
+        w = konsistenz_warnung(t, r2["mos_live_min"], _f(row, "mos_rule"))
+        if w:
+            logger.warning(w)
     attach_smart_money(out_rows, cfg, db_path=Path(args.db))
     # v53/v57/v60: Live-Stand + Kurshistorie + Timing in die DB schreiben
     from decisions import init_db  # lazy import (Schema anlegen, falls DB neu)
@@ -557,7 +622,7 @@ def main() -> None:
     con = init_db(Path(args.db))
     ensure_schema(con)
     # v60: Kurshistorie backfillen (erst 2y, dann nur neue Tage), dann Timing aus prices
-    n_hist, hist_errors = backfill_prices(con, tickers, batch=args.batch, pause=args.pause)
+    n_hist, hist_errors = backfill_prices(con, batch_tickers, batch=args.batch, pause=args.pause)
     errors = errors + hist_errors
     tim = timing_from_db(con, tickers)
     for r in out_rows:
@@ -568,6 +633,10 @@ def main() -> None:
             r["abstand_sma200"] = tim[tk]["abstand_sma200"]
     logger.info("Historie: %d Kurse eingefuegt", n_hist)
     store_live_status(con, out_rows, prices)   # inkl. timing_status in watchlist_status
+    # v62 Altbestand: valuations/decisions ohne aktien_aktuell umrechnen (Flag umgerechnet)
+    n_fix = migrate_share_basis(con, cfg, rows_by_t)
+    if n_fix:
+        logger.info("Aktienbasis-Fix: %d Alt-Zeilen umgerechnet (iv_aktuell, Flag umgerechnet)", n_fix)
     con.close()
     write_watchlist_csv(out_rows, args.out)
     print_table(out_rows)

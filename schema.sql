@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS valuations (
     naechster_earnings TEXT,                   -- naechster Earnings-Termin (ISO)
     flags           TEXT,                      -- Flags des Laufs (Leerzeichen-getrennt)
     quelle_csv      TEXT,                      -- ranking CSV, aus der der Snapshot stammt
+    aktien_aktuell  REAL,                      -- v62 Aktienbasis-Fix (Altbestand)
+    iv_aktuell      REAL,                      -- v62: iv_base * kurs_boerse / kurs_marktkap_basis
     PRIMARY KEY (ticker, calc_date)
 );
 CREATE INDEX IF NOT EXISTS idx_valuations_calc ON valuations (calc_date);
@@ -105,8 +107,12 @@ CREATE TABLE IF NOT EXISTS decisions (
     fonds_kaeufer   TEXT,
     fonds_verkaeufer TEXT,
     wahrscheinlichkeit_p REAL,                  -- p = erwartungswert_pct/100 (Rendite >= +10 % in 12 M)
-    start_datum     TEXT                        -- v56 Look-ahead: Startdatum der Rendite je Zeile =
+    start_datum     TEXT,                       -- v56 Look-ahead: Startdatum der Rendite je Zeile =
                                                 -- max(Snapshot-Datum, juengstes filing_datum der verwendeten 13F)
+    aktien_aktuell  REAL,                       -- v62 Aktienbasis-Fix (Altbestand): umgerechnete aktien_aktuell
+    iv_aktuell      REAL,                       -- v62: iv_base * kurs_boerse / kurs_marktkap_basis
+    flags           TEXT,                       -- v62: z. B. "umgerechnet"
+    hinweis         TEXT                        -- v62: z. B. Aktienbasis-Fix-Hinweis fuer datum share_basis_fix.datum
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_ticker ON decisions (ticker);
 -- Idempotenz der Korb-Snapshots: (ticker, korb, datum) eindeutig -- geschriebene

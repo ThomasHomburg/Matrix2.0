@@ -143,6 +143,13 @@ class YfinanceProvider:
                                        int(financials.columns[0].year))
             from datetime import date
             result.market_cap_date = date.today().isoformat()  # Stichtag: Abrufdatum
+        # v62: Boersen-Schlusskurs (kurs_boerse) aus dem Quote
+        pr = info.get("regularMarketPrice") or info.get("currentPrice")
+        if pr is not None:
+            from datetime import date
+            result.price = Metric("price", float(pr), currency, currency,
+                                  int(financials.columns[0].year))
+            result.price_date = date.today().isoformat()
         # naechster Earnings-Termin, falls im info-Feld vorhanden
         ned = info.get("nextEarningsDate") or info.get("earningsDate")
         if ned is not None:

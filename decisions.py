@@ -482,6 +482,172 @@ def _snapshot_koerbe(args, cfg: dict, con: sqlite3.Connection) -> None:
         sys.exit(1)
     koerbe_map = koerbe(cfg, rows)
     namen = list(KORB_NAMEN) if korb_arg == "all" else [korb_arg]
+    gew = _default_gewichte(cfg)
+    if args.gewichte:
+        parts = [float(x) for x in args.gewichte.split("/")]
+        if len(parts) != 3 or abs(sum(parts) - 1.0) > 1e-6:
+            print("Fehler: --gewichte als bear/base/bull mit Summe 1 angeben (z. B. 25/50/25 -> 0.25/0.5/0.25).",
+                  file=sys.stderr)
+            sys.exit(1)
+        gew = {"bear": parts[0], "base": parts[1], "bull": parts[2]}
+    ew = erwartungswert_pct(v["iv_bear"], v["iv_base"], v["iv_bull"], kurs, gew)
+    con.execute(
+        """INSERT INTO decisions
+           (ticker, datum, aktion, kurs, status_screener, iv_base, iv_bear, iv_bull,
+            gew_bear, gew_base, gew_bull, erwartungswert_pct, horizont_monate,
+            thesis, break_condition)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (ticker, heute.isoformat(), args.aktion, kurs, v["status"],
+         v["iv_base"], v["iv_bear"], v["iv_bull"],
+         gew["bear"], gew["base"], gew["bull"], ew, args.horizont,
+         args.thesis, args.break_condition))
+    con.commit()
+    print(f"Gespeichert: {ticker} {heute.isoformat()} aktion={args.aktion} kurs={kurs:.2f} "
+          f"status={v['status'] or 'n/a'} iv_base={v['iv_base']:.2f} "
+          f"EW={ew:.1f}% (p={ew/100:.2f}) horizont={args.horizont}M")
+
+
+# --------------------------------------------------------------------------
+# snapshot: monatlich automatisch fuer alle Kandidaten/Beobachtungstitel
+# --------------------------------------------------------------------------
+
+def _watchlist_aus_ranking(ranking_csv: str | None, cfg: dict) -> list[dict]:
+    """Alle Rows mit Status in watchlist.statuses (Default Kandidat/Beobachtung...)."""
+    statuses = set(cfg.get("watchlist", {}).get(
+        "statuses", ["Kandidat", "Beobachtung", "Beobachtung (nicht normalisiert)"]))
+    if not ranking_csv or not Path(ranking_csv).exists():
+        return []
+    out = []
+    with open(ranking_csv, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            if (row.get("status") or "").strip() in statuses:
+                out.append(row)
+    return out
+
+
+def cmd_snapshot(args) -> None:
+    cfg = load_config()
+    con = _connect(Path(args.db))
+    korb_arg = getattr(args, "korb", None)
+    if korb_arg:
+        _snapshot_koerbe(args, cfg, con)
+        return
+    heute = _heute()
+    # monatlich: nur einmal pro Kalendermonat snapshotten (Legacy-Zeilen korb='')
+    cur = con.execute(
+        "SELECT COUNT(*) AS n FROM decisions WHERE aktion='auto' AND korb='' "
+        "AND strftime('%Y-%m', datum)=?",
+        (heute.strftime("%Y-%m"),))
+    if cur.fetchone()["n"] > 0:
+        print(f"Snapshot fuer {heute.strftime('%Y-%m')} existiert bereits -- nichts zu tun.")
+        return
+    rows = _watchlist_aus_ranking(getattr(args, "ranking", None), cfg)
+    if not rows:
+        print("Keine Watchlist-Titel gefunden -- --ranking <csv> angeben.", file=sys.stderr)
+        sys.exit(1)
+    gew = _default_gewichte(cfg)
+    n = 0
+    for row in rows:
+        ticker = (row.get("ticker") or "").strip().upper()
+        v = _vals(row)
+        kurs = v["kurs"]
+        if kurs != kurs or kurs <= 0:
+            continue
+        ew = erwartungswert_pct(v["iv_bear"], v["iv_base"], v["iv_bull"], kurs, gew)
+        con.execute(
+            """INSERT INTO decisions
+               (ticker, datum, aktion, kurs, status_screener, iv_base, iv_bear, iv_bull,
+                gew_bear, gew_base, gew_bull, erwartungswert_pct, horizont_monate,
+                thesis, break_condition)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (ticker, heute.isoformat(), "auto", kurs, v["status"],
+             v["iv_base"], v["iv_bear"], v["iv_bull"],
+             gew["bear"], gew["base"], gew["bull"], ew, 12,
+             "auto-Snapshot (Kandidat/Beobachtung)", ""))
+        n += 1
+    con.commit()
+    print(f"Snapshot {heute.isoformat()}: {n} Auto-Eintraege (aktion=auto, Horizont 12M).")
+
+
+def _max_filing_datum(con: sqlite3.Connection, ticker: str) -> str:
+    """v56 Look-ahead: juengstes filing_datum der 13F-Positionen eines Tickers
+    (die verwendeten Smart-Money-Signale); '' wenn keine DB/Tabelle/Positionen."""
+    tabs = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "smart_money_positions" not in tabs:
+        return ""
+    r = con.execute(
+        "SELECT MAX(filing_datum) FROM smart_money_positions WHERE ticker=?",
+        (ticker.upper(),)).fetchone()
+    return (r[0] or "")[:10] if r and r[0] else ""
+
+
+def _kurs_am(con: sqlite3.Connection, ticker: str, wann: date) -> tuple[float | None, str]:
+    """v56: Kurs am Snapshot-Tag `wann` aus prices (exakt, sonst naechster frueherer
+    Tag) -> (kurs, kurs_datum); (None, "") wenn keine prices-Tabelle/Daten."""
+    tabs = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "prices" not in tabs:
+        return None, ""
+    r = con.execute(
+        "SELECT kurs, datum FROM prices WHERE ticker=? AND datum<=? ORDER BY datum DESC LIMIT 1",
+        (ticker.upper(), wann.isoformat())).fetchone()
+    if r and r[0] is not None:
+        return float(r[0]), (r[1] or "")[:10]
+    return None, ""
+
+
+def _start_datum(datum: str, ticker: str, con: sqlite3.Connection) -> str:
+    """v56: Startdatum der Rendite je Zeile = max(Snapshot-Datum, juengstes
+    filing_datum der verwendeten 13F-Signale des Tickers)."""
+    fd = _max_filing_datum(con, ticker)
+    return max(datum, fd) if fd else datum
+
+
+def _snapshot_koerbe(args, cfg: dict, con: sqlite3.Connection) -> None:
+    """v52/v56: snapshot --korb all|screener|divergenz|kontrolle|benchmark [--datum ...]
+    (Default --datum = heute = Tag des Snapshots). Schreibt je Ticker und Korb eine
+    Zeile (aktion=auto). Idempotent je (ticker, korb, datum): vorhandene Zeilen werden
+    uebersprungen, nie ueberschrieben.
+
+    v56 Look-ahead: Startkurs = Kurs am Snapshot-Tag (aus prices, Datum <= --datum;
+    Fallback ranking-Kurs). Liegt --datum vor dem filing_datum eines verwendeten
+    13F-Signals, bricht der Lauf VOR dem Schreiben ab ("Datum liegt vor
+    Veroeffentlichung der Signale (Look-ahead)"). start_datum je Zeile =
+    max(--datum, juengstes filing_datum)."""
+    korb_arg = args.korb
+    datum = (_parse_date(args.datum).isoformat() if getattr(args, "datum", None)
+             else _heute().isoformat())
+    datum_d = _parse_date(datum)
+    overlap = getattr(args, "overlap", None) or (
+        "smart_money_overlap.csv" if Path("smart_money_overlap.csv").exists() else None)
+    live = getattr(args, "live", None) or (
+        "watchlist_live.csv" if Path("watchlist_live.csv").exists() else None)
+    rows = _korb_rows(getattr(args, "ranking", None), overlap, live)
+    if not rows:
+        print("Keine Ranking-Zeilen gefunden -- --ranking <csv> angeben.", file=sys.stderr)
+        sys.exit(1)
+    koerbe_map = koerbe(cfg, rows)
+    namen = list(KORB_NAMEN) if korb_arg == "all" else [korb_arg]
+    # v62 Benchmark: Ticker aus config decisions.baskets.benchmark auch ohne ranking-Zeile
+    # aufnehmen; Kurs aus prices (datum <= --datum). Fehlt ein Benchmark-Kurs -> Abbruch
+    # vor dem Schreiben.
+    bench_list = [str(x).upper() for x in
+                  cfg.get("decisions", {}).get("baskets", {}).get("benchmark", ["SPY", "RSP"])]
+    if "benchmark" in namen:
+        koerbe_map.setdefault("benchmark", [])
+        have = {r["ticker"] for r in koerbe_map["benchmark"]}
+        for bt in bench_list:
+            if bt not in have:
+                koerbe_map["benchmark"].append({"ticker": bt, "status": "Benchmark"})
+        rk = {r.get("ticker"): _f(r, "kurs") for r in rows}
+        fehlt = []
+        for bt in bench_list:
+            rv = rk.get(bt)
+            if _kurs_am(con, bt, datum_d)[0] is None and not (rv is not None and rv == rv and rv > 0):
+                fehlt.append(bt)
+        if fehlt:
+            raise SystemExit(
+                f"Snapshot abgebrochen: kein Benchmark-Kurs ({', '.join(fehlt)}) fuer datum "
+                f"{datum} in prices -- zuerst live_update.py laufen lassen (Benchmark im Kurs-Batch).")
     # Look-ahead-Guard: --datum vor filing_datum verwendeter Signale -> Abbruch vor dem Schreiben
     offenders = []
     for name in namen:

@@ -643,6 +643,11 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict) -> dict:
         # Export-Felder fuer Tracker/Live-Update (nur Anzeige/Export,
         # die Screener-Logik bleibt unveraendert)
         "kurs": price,
+        # v62 Aktienbasis: Boersen-Kurs + Aktienzahlen (Screener-MoS/Kandidatenregeln unveraendert)
+        "kurs_boerse": (dcf.kurs_boerse if dcf.kurs_boerse == dcf.kurs_boerse else float("nan")),
+        "kurs_marktkap_basis": price,
+        "aktien_dcf": dcf.shares,
+        "aktien_aktuell": (dcf.shares_current if dcf.shares_current == dcf.shares_current else float("nan")),
         "kurs_datum": m.market_cap_date or "",
         "calc_date": date.today().isoformat(),
         "iv_bear": dcf.scenarios.get("bear").value_per_share if dcf.scenarios.get("bear") else float("nan"),
