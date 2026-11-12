@@ -51,6 +51,14 @@ def _fmt(value: float, spec: str) -> str:
     return "n/a" if math.isnan(value) else format(value, spec)
 
 
+def _fmt_mos_cell(r: dict) -> str:
+    """v61: mos:extrem -> '< -1000 %' in der Tabelle; Rohwert bleibt in der CSV."""
+    v = r.get("margin_of_safety", float("nan"))
+    if "mos:extrem" in (r.get("flags") or "") and v == v:
+        return "< -1000 %"
+    return _fmt(v, ">8.1%")
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Rangliste berechnen (CLI)")
     p.add_argument("tickers_pos", nargs="*", help="einzelne Ticker (ohne --tickers)")
@@ -228,13 +236,19 @@ def main() -> None:
             f"{_fmt(r['roic_5y'], '>8.1%')} "
             f"{_fmt(r['roic_latest'], '>11.1%')} "
             f"{_fmt(r['nd_ebitda'], '>9.2f')} "
-            f"{_fmt(r['margin_of_safety'], '>8.1%')} "
+            f"{_fmt_mos_cell(r)} "
             f"{_fmt(r['mos_bear'], '>8.1%')} "
             f"{_fmt(r['mos_bull'], '>8.1%')}  {r['kandidat']} | {r['flags']}"
         )
     buys = [r["ticker"] for r in rows if r.get("is_buy")]
     if buys:
         print(f"\nKaufkandidaten: {', '.join(buys)}")
+
+    # v61: Zahl der Sanity-Flags in der Ausgabe (Rohwerte bleiben in der CSV)
+    n_extrem = sum(1 for r in rows if "mos:extrem" in (r.get("flags") or ""))
+    n_null = sum(1 for r in rows if "wert:nahe_null" in (r.get("flags") or ""))
+    if n_extrem or n_null:
+        print(f"\nSanity-Flags: {n_extrem + n_null} (mos:extrem {n_extrem}, wert:nahe_null {n_null})")
 
     if errors:
         print(f"\nFehlerlog ({len(errors)}):")

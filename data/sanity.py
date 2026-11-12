@@ -105,3 +105,31 @@ def check_ticker(m: TickerMetrics, sanity_cfg: dict, fx=None) -> list[str]:
             logger.info("%s: ROIC = n/a (NOPAT oder investiertes Kapital fehlt", t)
 
     return violations
+
+
+def classify_mos_case(kurs, iv_base, net_debt=float("nan"), shares=float("nan"),
+                      fcf_unit: str = "USD", nd_unit: str = "USD") -> dict:
+    """v61: Einordnung eines extremen MoS (Diagnose Lauf v55). Rueckgabe
+    {"verdict", "grund"}:
+      - "datenluecke"     : iv_base oder kurs NaN (keine Bewertung berechnet)
+      - "einheitenfehler" : FCF- und ND-Einheit nicht beide absolute Waehrung
+                            (z. B. Mio. vs. absolut -> Faktor 1e6)
+      - "wert_nahe_null"  : 0 < iv_base < 1 % des Kurses (DCF-Wert nahe null,
+                            MoS = 1 - kurs/iv -> -unendlich)
+      - "ok"              : sonst (MoS extrem, aber Wert/Einheiten plausibel)
+    """
+    nan = float("nan")
+    if iv_base != iv_base or kurs != kurs:
+        return {"verdict": "datenluecke", "grund": "iv_base oder kurs = NaN"}
+    fu, nu = (fcf_unit or "").upper(), (nd_unit or "").upper()
+    # "currency" = reportedCurrency des Statements (Wildcard, nicht "Mio.")
+    wildcard = {"", "CURRENCY", "N/A", "NA"}
+    mismatch = (fu not in wildcard and nu not in wildcard and fu != nu) or "MIO" in fu or "MIO" in nu
+    if mismatch:
+        return {"verdict": "einheitenfehler",
+                "grund": f"FCF-Einheit '{fcf_unit}' != ND-Einheit '{nd_unit}' (Skalenfehler moeglich)"}
+    if 0 < iv_base < 0.01 * kurs:
+        return {"verdict": "wert_nahe_null",
+                "grund": f"iv_base {iv_base:.6g} < 1 % von kurs {kurs:.6g} (Wert nahe null)"}
+    return {"verdict": "ok",
+            "grund": f"iv_base {iv_base:.6g}, kurs {kurs:.6g}, ND {net_debt:.6g}, Aktien {shares:.6g} plausibel"}
