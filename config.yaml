@@ -426,6 +426,15 @@ decisions:
   horizonte_monate: [3, 6, 12, 24]  ## Review-Horizonte (30 Tage/Monat)
   review_csv: "decisions_review.csv"
 
+# Ein-Kommando-Quartalslauf (quartalslauf.py run)
+quartalslauf:
+  version: 62                                  ## v{version} in der Ausgabedatei
+  db: "value_tracker.db"
+  tickers_csv: "tickers_sp500.csv"             ## Universum fuer run_ranking.py
+  watch_csv: "ticker_watch_v40.csv"            ## Watchlist fuer overlap/live_update
+  ranking_out: "ranking_sp500_v{version}_{datum}.csv"   ## {version} aus config, {datum} = heute
+  logs_dir: "logs"
+
 # Trend-Layer (trends.py, v54 Teil A: Struktur + Quellenregister + Bewertung).
 # Multi-Layer-Foresight-Framework: L1 Wissenschaft/Technologie, L2 Markt/Kapital,
 # L3 Regulierung/Politik, L4 Nachfrage/Cross-Industry.

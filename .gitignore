@@ -14,3 +14,4 @@ trend_overlay.csv
 rationale_worklist.csv
 sec_test.py
 debug_fetch*.py
+logs/
