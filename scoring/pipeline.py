@@ -234,13 +234,12 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict) -> dict:
                           f"(bei Modus {', '.join(deciding)})"
                           if mos_rule_val == mos_rule_val else "")
             return st, detail
-        if (quality_ok_global and mos_rule_val == mos_rule_val and mos_rule_val < mos_min
-                and modes_for_rule):
-            best_mode, best_val = max(modes_for_rule, key=lambda kv: kv[1])
-            if best_val >= watch_min:
-                return "Beobachtung", (f"bester Modus {mode_names.get(best_mode, best_mode)} "
-                                        f"{best_val:.1%} ≥ {watch_min:.0%}, "
-                                        f"aber min {mos_rule_val:.1%} < {mos_min:.0%}")
+        # v64: Beobachtung NUR, wenn das Minimum (mos_rule) >= watch_min. Der alte
+        # Sonderfall "bester Modus >= watch_min bei min < watch_min" (z. B. SNDK mit
+        # mos_rule -87,9 %) entfällt -> dann "nein".
+        if quality_ok_global and mos_rule_val == mos_rule_val and mos_rule_val >= watch_min:
+            return "Beobachtung", (f"MoS min {mos_rule_val:.1%} >= {watch_min:.0%}; "
+                                    f"Kandidat-Regel knapp verfehlt: {'; '.join(missing)}")
         # Begruendung aus `missing` anhaengen (z. B. Start-FCF <= 0 im Modus X)
         return "nein", "; ".join(missing)
 
@@ -420,12 +419,16 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict) -> dict:
             "SBC fehlt in allen Jahren; ohne SBC Quality ≥ "
             f"{quality_min:.0f} und MoS ≥ {mos_min:.0%} -> manuell pruefen; nie Kandidat")
     # Zykliker ohne volle Normalisierung -> nie Kandidat, max. Beobachtung
-    if zyk_unnorm and status in ("Kandidat", "Beobachtung"):
+    if zyk_unnorm and status in ("Kandidat", "Beobachtung", "nein"):
+        # v64: Ausnahme "nicht normalisiert" NUR bei Zyklikern, mit sichtbarem
+        # Hinweis im Status UND in den Flags
         status = status_all = status_recent2 = "Beobachtung (nicht normalisiert)"
         status_detail = status_all_detail = status_recent2_detail = (
             f"Zykliker ({m.industry}): nur {norm_years} Jahre Normalisierung "
             f"(< {rule.normalized_earnings_years}) -> max. Beobachtung; nie Kandidat")
         dcf.is_buy = False
+        if "nicht normalisiert" not in flag_parts:
+            flag_parts.append("nicht normalisiert")
 
 
     # SBC fehlt -> DCF/FCF ohne SBC (Fallback Roh-FCF) -> Flag;
