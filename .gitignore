@@ -15,3 +15,9 @@ rationale_worklist.csv
 sec_test.py
 debug_fetch*.py
 logs/
+
+# Lauf-Artefakte (v62 Push-Check)
+watchlist_live*.csv
+testlauf_*.csv
+testlauf_fehler*.txt
+rohwerte_*.txt
