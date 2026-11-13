@@ -130,6 +130,7 @@ def _write_ranking_csv(rows: list[dict], excluded: list[dict], errors: list[dict
             "roic_5y", "roic_latest", "fcf_yield_3y", "history_years", "flags",
             "sec_check_ok", "sec_check_flag", "sec_check_note", "sec_detail", "kandidat",
             "mos_robust", "status_pruefen_capex", "nd_inconsistent", "zyk_unnorm",
+            "kurs_boerse", "kurs_marktkap_basis", "aktien_dcf", "aktien_aktuell",  # v62 Aktienbasis
             # Export fuer Tracker/Live-Update
             "kurs", "kurs_datum", "calc_date",
             "iv_bear", "iv_base", "iv_bull",

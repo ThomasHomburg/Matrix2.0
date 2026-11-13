@@ -40,6 +40,8 @@ class TickerMetrics:
     extras: dict[str, Metric] = field(default_factory=dict)
     market_cap: Metric | None = None
     market_cap_date: str = ""  # Stichtag der Marktkapitalisierung (ISO-Datum, Abrufdatum)
+    price: Metric | None = None      # v62: Boersen-Schlusskurs (kurs_boerse), nicht mcap/Aktien
+    price_date: str = ""             # Stichtag des Kurses (Abrufdatum)
     # naechster Earnings-Termin (ISO-Datum), falls der Provider ihn liefert
     next_earnings_date: str = ""
     years: dict[str, dict[str, Metric]] = field(default_factory=dict)
@@ -163,6 +165,13 @@ def extract_metrics(
             result.market_cap = _metric("market_cap", float(mcap), "USD", "USD",
                                         all_years[0] if all_years else 0)
             result.market_cap_date = date.today().isoformat()  # Stichtag: Abrufdatum
+        # v62: Boersen-Schlusskurs aus dem Profil (FMP profile.price), falls vorhanden
+        pr = profile.get("price") if profile else None
+        if pr is not None:
+            cur = (profile.get("currency") or "USD").upper()
+            result.price = _metric("price", float(pr), cur, cur, all_years[0] if all_years else 0)
+            from datetime import date as _d
+            result.price_date = _d.today().isoformat()
 
     for fy in all_years:
         inc = inc_y.get(fy, {})

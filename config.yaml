@@ -311,6 +311,7 @@ sanity:
 
 dcf:
   # Innerer Wert (DCF, 3 Szenarien). Basis: normalisierter FCF nach SBC
+  share_basis: "current"      ## v62 Aktienbasis: current = Equity/(Marktkap./kurs_boerse) | fy_diluted
   # (Ø FCF - Aktienverguetung der letzten 3 Jahre). Wachstum Jahre 1-5:
   # Bear 0 %, Base = min(Umsatz-CAGR, base_growth_cap),
   # Bull = min(CAGR x bull_growth_multiplier, bull_growth_cap);
@@ -401,6 +402,10 @@ watchlist:
 
 # Entscheidungslog mit Vergleichkoerben (decisions.py snapshot --korb all / review).
 decisions:
+  # v62 Altbestand Aktienbasis-Fix: Zeilen mit diesem Snapshot-Datum bekommen den Hinweis
+  share_basis_fix:
+    datum: "2026-11-11"
+    hinweis: "Aktienbasis-Fix: p, EW und Kaufzone ungueltig, Rendite-Start unveraendert"
   baskets:
     # screener: alle Ticker mit einem dieser Status (Default = watchlist.statuses)
     screener_statuses: ["Kandidat", "Beobachtung", "Beobachtung (nicht normalisiert)"]
