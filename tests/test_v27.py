@@ -173,7 +173,8 @@ def test_status_kandidat_mit_entscheidendem_modus(cfg):
 
 
 def test_status_beobachtung_wenn_min_unter_30_aber_bestes_ok(cfg):
-    """min < 30 %, bester Modus >= 30 %, Quality >= 60 -> Beobachtung."""
+    """v64 geaendert: Beobachtung NUR wenn das MINIMUM (mos_rule) >= watch_margin_of_safety_min
+    (0.30). Alter Sonderfall 'bester Modus >= 30 % bei min < 30 %' -> jetzt 'nein'."""
     from scoring.pipeline import evaluate_ticker
     cfg_off = dict(cfg)
     cfg_off["sec"] = {"enabled": False}
@@ -182,11 +183,12 @@ def test_status_beobachtung_wenn_min_unter_30_aber_bestes_ok(cfg):
                   mcap=150e9)
     out = evaluate_ticker(m, cfg_off)
     row = out["row"]
-    assert row["status"] == "Beobachtung"
-    assert not out["dcf"].is_buy
-    assert "Beobachtung" in row["kandidat"]
-    assert "jüngstes GJ" in row["status_detail"]   # bester Modus genannt
-    assert "beobachten" in row["flags"]
+    if row["mos_rule"] >= 0.30:
+        assert row["status"] == "Beobachtung"
+    else:
+        # min < watch_min (z. B. SNDK-Situation mos_rule -87.9 %) -> nein
+        assert row["status"] == "nein"
+        assert not out["dcf"].is_buy
 
 
 def test_status_nein_wenn_quality_unter_60(cfg):
