@@ -129,7 +129,10 @@ criteria:
     direction: higher
     full: 0.40
     zero: 0.0
-  ev_ebit_vs_median:
+  ev_ebit_vs_hist_ebit:
+    # v65: KEIN historischer EV/EBIT-Median (keine historischen Marktkaps verfuegbar):
+    # aktuelles EV (heute) je historischem EBIT, ins Verhaeltnis zum eigenen Median
+    # (= median(EBIT)/EBIT_aktuell). Bezeichnung entsprechend angepasst.
     block: valuation
     weight: 0.30
     direction: lower
@@ -275,9 +278,11 @@ sector_rules:
         # NICHT dabei: "Financial Data & Stock Exchanges" (CME, ICE, SPGI, MCO, ...) -> Normalmodell
 
 score_groups:
-  # Quality-Score und Value-Score werden getrennt berechnet (gewichtete Summe
-  # der Block-Scores je Gruppe, renormalisiert auf die verfuegbaren Bloecke).
+  # Quality-Score und Value-Score werden getrennt berechnet. Bloecke werden mit
+  # der Summe ihrer Kriteriengewichte gewichtet (v65; vorher gleich 1.0 je Block),
+  # renormalisiert auf die verfuegbaren Bloecke.
   # Gesamtscore = weights.quality * Quality + weights.value * Value.
+  # Schwellenwertpruefungen (min_coverage_*) verwenden UNGERUNDETE Coverage-Rohwerte.
   quality_blocks: [profitability, stability, cashflow, moat]
   value_blocks: [valuation]
   weights:

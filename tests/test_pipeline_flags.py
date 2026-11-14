@@ -214,7 +214,7 @@ def test_value_weights_sum_to_one(cfg):
     aktiviert (siehe test_v28.py)."""
     w = {n: c["weight"] for n, c in cfg["criteria"].items()
          if c["block"] == "valuation" and n != "ffo_yield"}
-    assert w == {"fcf_yield_sbc_avg3": 0.30, "mos_base": 0.40, "ev_ebit_vs_median": 0.30}
+    assert w == {"fcf_yield_sbc_avg3": 0.30, "mos_base": 0.40, "ev_ebit_vs_hist_ebit": 0.30}
     assert abs(sum(w.values()) - 1.0) < 1e-9
 
 

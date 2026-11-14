@@ -167,7 +167,7 @@ def test_dow_quality_score_trotz_value_luecken(cfg):
     m = _mk_dow_like()
     criteria = compute_criteria(m, cfg)
     # alle Value-Kriterien n/a, alle Quality-Kriterien bewertet
-    val_na = [n for n in ("fcf_yield_sbc_avg3", "mos_base", "ev_ebit_vs_median")
+    val_na = [n for n in ("fcf_yield_sbc_avg3", "mos_base", "ev_ebit_vs_hist_ebit")
               if criteria[n].is_na]
     assert len(val_na) == 3
     res = score_ticker(criteria, cfg["criteria"], cfg.get("score_groups"))
