@@ -518,9 +518,11 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict) -> dict:
                         if k not in ym or ym[k].is_na()]
         if missing_keys:
             dq.append(f"FY{fy} Datenluecke: {', '.join(missing_keys)}")
+    # v65: Schwellenwertpruefung mit UNGERUNDETEM Rohwert (coverage_raw)
     min_cov = float(cfg.get("score_groups", {}).get("min_coverage_value", 0.70))
-    if result["coverage"] == result["coverage"] and result["coverage"] < min_cov:
-        dq.append(f"Datenabdeckung {result['coverage']:.0%} < {min_cov:.0%}")
+    cov_raw = result.get("coverage_raw", result["coverage"])
+    if cov_raw == cov_raw and cov_raw < min_cov:
+        dq.append(f"Datenabdeckung {cov_raw:.0%} < {min_cov:.0%}")
     if sec is not None and sec.flag and sec_detail:
         dq.append(f"SEC-Abweichung: {sec_detail}")
     if special:
@@ -551,7 +553,8 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict) -> dict:
         "quality": result["quality"],
         "value": result["value"],
         "coverage": result["coverage"],
-        "quality_coverage": result.get("quality_coverage", result["coverage"]),  # 
+        "quality_coverage": result.get("quality_coverage", result["coverage"]),
+        "value_coverage": result.get("value_coverage", float("nan")),  # v65: nur Value-Bloecke  # 
         "fcf_yield": fcf_yield(m, latest_fy),
         "fcf_yield_sbc": fcf_yield_sbc(m, latest_fy),
         "fcf_yield_3y": criteria["fcf_yield_sbc_avg3"].value,  # nach SBC (Value-Score)
@@ -560,7 +563,7 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict) -> dict:
         "roic_latest": roic(m, latest_fy),   # ROIC neuestes Geschaeftsjahr (Spalte + Metrik)
         "roic_latest_fy": latest_fy,
         "nd_ebitda": criteria["net_debt_ebitda"].value,
-        "ev_ebit_med": criteria["ev_ebit_vs_median"].value,
+        "ev_ebit_med": criteria["ev_ebit_vs_hist_ebit"].value,
         # Margin of Safety (Base) aus dem DCF-Modul (Build-Schritt 6)
         "margin_of_safety": dcf.margin_of_safety,
         # MoS je Szenario + Kandidaten-Spalte (ja/nein + fehlende Bedingung)

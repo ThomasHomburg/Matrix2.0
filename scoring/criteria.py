@@ -70,25 +70,54 @@ def _avg(values: list[float]) -> float:
     return sum(values) / len(values) if values else float("nan")
 
 
+def _cagr_pairs(pairs: list[tuple[int, float]]) -> float:
+    """CAGR anhand der tatsaechlichen Geschaeftsjahre: (Endwert/Anfangswert)^(1/(letztes_fy-erstes_fy))-1.
+
+    NaN bei: weniger als 2 Punkte, zeitlicher Spanne <= 0, Anfangswert <= 0
+    oder Endwert <= 0 (Vorzeichenwechsel/negativ -> mathematisch nicht sinnvoll).
+    """
+    if len(pairs) < 2:
+        return float("nan")
+    pairs = sorted(pairs)
+    span = pairs[-1][0] - pairs[0][0]
+    start, end = pairs[0][1], pairs[-1][1]
+    if span <= 0 or start <= 0 or end <= 0:
+        return float("nan")
+    return (end / start) ** (1.0 / span) - 1.0
+
+
 def _cagr(values: list[float]) -> float:
-    """Jaehrliche Wachstumsrate ueber n-1 Jahre (chronologisch)."""
-    if len(values) < 2 or values[0] <= 0:
+    """CAGR ueber gleichabstaendige Punkte (Index = Jahr); Endwert <= 0 -> NaN."""
+    if len(values) < 2 or values[0] <= 0 or values[-1] <= 0:
         return float("nan")
     n = len(values) - 1
     return (values[-1] / values[0]) ** (1 / n) - 1
 
 
-def _slope(values: list[float]) -> float:
-    """Steigung pro Jahr via kleinste Quadrate; Index = Jahr (0, 1, 2, ...)."""
-    n = len(values)
-    if n < 2:
+def _slope_pairs(pairs: list[tuple[int, float]]) -> float:
+    """Steigung pro Jahr via kleinste Quadrate; x = tatsaechliches Geschaeftsjahr
+    (Luecken in der Historie werden als solche beruecksichtigt, nicht als Index)."""
+    if len(pairs) < 2:
         return float("nan")
-    xs = list(range(n))
+    pairs = sorted(pairs)
+    xs = [float(fy) for fy, _ in pairs]
+    ys = [v for _, v in pairs]
+    n = len(pairs)
     mx = sum(xs) / n
-    my = sum(values) / n
-    num = sum((x - mx) * (y - my) for x, y in zip(xs, values))
+    my = sum(ys) / n
+    num = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
     den = sum((x - mx) ** 2 for x in xs)
     return num / den if den else float("nan")
+
+
+def _slope(values: list[float]) -> float:
+    """Steigung ueber gleichabstaendige Punkte (Index = Jahr)."""
+    return _slope_pairs([(i, v) for i, v in enumerate(values)])
+
+
+def _by_year(metrics: TickerMetrics, name: str) -> dict[int, float]:
+    """{Geschaeftsjahr: Wert} ohne NaN -- explizite Zuordnung ueber das FY."""
+    return dict(_values(metrics, name))
 
 
 def _result(value: float, is_na: bool, years_available: int, thin_years: int) -> CriterionResult:
@@ -110,9 +139,10 @@ def calc_roic_avg5(m: TickerMetrics, cfg, _fx) -> CriterionResult:
     # Sonderregel (Banken/Versicherer/REITs/Versorger) -> ROIC n/a
     if _special(m, cfg):
         return _result(float("nan"), True, 0, thin)
-    years = _year_count(m, "ebit")
     vals = [roic(m, fy) for fy, _ in _values(m, "ebit")]
     vals = [v for v in vals if v == v]
+    # v65: years_available = tatsaechlich valide ROIC-Jahre (nicht nur EBIT-Jahre)
+    years = min(_year_count(m, "ebit"), len(vals)) if vals else _year_count(m, "ebit")
     if len(vals) < cfg["min_points_5y"]:
         return _result(float("nan"), True, years, thin)
     return _result(_avg(vals[-5:]), False, years, thin)
@@ -142,22 +172,35 @@ def calc_net_debt_ebitda(m: TickerMetrics, cfg, _fx) -> CriterionResult:
     # EBITDA unplausibel (EBITDA < EBIT) -> ND/EBITDA als n/a
     if getattr(m, "ebitda_unplausible", False):
         return _result(float("nan"), True, 0, thin)
-    years = _year_count(m, "net_debt", "ebitda")
-    nd = [v for _, v in _values(m, "net_debt")]
-    eb = [v for _, v in _values(m, "ebitda")]
-    if not nd or not eb:
+    # v65: explizite Zuordnung ueber das Geschaeftsjahr -- ND und EBITDA nur aus
+    # DEM SELBEN juengsten gemeinsamen Jahr. EBITDA <= 0 -> n/a (nicht plausibel).
+    nd_d = _by_year(m, "net_debt")
+    eb_d = _by_year(m, "ebitda")
+    common = sorted(set(nd_d) & set(eb_d))
+    years = len(common)
+    if not common:
         return _result(float("nan"), True, years, thin)
-    return _result(nd[-1] / eb[-1] if eb[-1] else float("nan"), False, years, thin)
+    fy = common[-1]
+    eb = eb_d[fy]
+    if eb <= 0:
+        return _result(float("nan"), True, years, thin)
+    return _result(nd_d[fy] / eb, False, years, thin)
 
 
 def calc_interest_coverage(m: TickerMetrics, cfg, _fx) -> CriterionResult:
     thin = cfg["thin_years"]
-    years = _year_count(m, "ebit", "interest_expense")
-    ebit = [v for _, v in _values(m, "ebit")]
-    interest = [v for _, v in _values(m, "interest_expense")]
-    if not ebit or not interest:
+    # v65: EBIT und Zinsaufwand aus dem SELBEN juengsten gemeinsamen Geschaeftsjahr;
+    # Zinsaufwand 0 oder fehlend -> n/a (nie Division durch 0).
+    ebit_d = _by_year(m, "ebit")
+    int_d = _by_year(m, "interest_expense")
+    common = sorted(set(ebit_d) & set(int_d))
+    years = len(common)
+    if not common:
         return _result(float("nan"), True, years, thin)
-    return _result(ebit[-1] / abs(interest[-1]) if interest[-1] else float("nan"), False, years, thin)
+    fy = common[-1]
+    if int_d[fy] == 0:
+        return _result(float("nan"), True, years, thin)
+    return _result(ebit_d[fy] / abs(int_d[fy]), False, years, thin)
 
 
 def calc_fcf_positive_years(m: TickerMetrics, cfg, _fx) -> CriterionResult:
@@ -195,7 +238,7 @@ def calc_fcf_margin_avg5(m: TickerMetrics, cfg, _fx) -> CriterionResult:
     years = _year_count(m, "fcf", "revenue")
     fcf = dict(_values(m, "fcf"))
     rev = dict(_values(m, "revenue"))
-    margins = [v / rev[fy] for fy, v in fcf.items() if fy in rev and rev[fy] != 0]
+    margins = [v / rev[fy] for fy, v in fcf.items() if fy in rev and rev[fy] > 0]
     if len(margins) < cfg["min_points_5y"]:
         return _result(float("nan"), True, years, thin)
     return _result(_avg(margins[-5:]), False, years, thin)
@@ -209,13 +252,15 @@ def calc_gross_margin_trend(m: TickerMetrics, cfg, _fx) -> CriterionResult:
     Prozentpunkte pro Jahr: -0.5 PP/Jahr = stark fallend.
     """
     thin = cfg["thin_years"]
-    years = _year_count(m, "gross_profit", "revenue")
-    gp = dict(_values(m, "gross_profit"))
-    rev = dict(_values(m, "revenue"))
-    margins = [gp[fy] / rev[fy] for fy in sorted(set(gp) & set(rev)) if rev[fy] != 0]
-    if len(margins) < cfg["trend_min_points"]:
+    gp = _by_year(m, "gross_profit")
+    rev = _by_year(m, "revenue")
+    # v65: gemeinsame Jahre explizit; Umsatz <= 0 -> Marge nicht aussagekraeftig
+    pairs = [(fy, gp[fy] / rev[fy]) for fy in sorted(set(gp) & set(rev)) if rev[fy] > 0]
+    years = len(pairs)
+    if len(pairs) < cfg["trend_min_points"]:
         return _result(float("nan"), True, years, thin)
-    return _result(_slope(margins) * 100, False, years, thin)
+    # v65: Steigung pro JAHR anhand der Geschaeftsjahre (nicht Listenindex)
+    return _result(_slope_pairs(pairs) * 100, False, years, thin)
 
 
 def calc_revenue_cagr_5y(m: TickerMetrics, cfg, _fx) -> CriterionResult:
@@ -227,10 +272,12 @@ def calc_revenue_cagr_5y(m: TickerMetrics, cfg, _fx) -> CriterionResult:
     """
     thin = cfg["thin_years"]
     years = _year_count(m, "revenue")
-    vals = [v for _, v in _values(m, "revenue")]
+    pairs = _values(m, "revenue")
+    vals = [v for _, v in pairs]
     if len(vals) < cfg["cagr_min_points"]:
         return _result(float("nan"), True, years, thin)
-    return _result(_cagr(vals), False, years, thin)
+    # v65: CAGR ueber die tatsaechlichen Geschaeftsjahre (Luecken zaehlen als Jahre)
+    return _result(_cagr_pairs(pairs), False, years, thin)
 
 
 def calc_fcf_yield_sbc_avg3(m: TickerMetrics, cfg, fx) -> CriterionResult:
@@ -271,7 +318,7 @@ def calc_mos_base(m: TickerMetrics, cfg, fx) -> CriterionResult:
     # Sonderregel -> DCF wird nicht berechnet -> MoS n/a
     if _special(m, cfg):
         return _result(float("nan"), True, len(m.years), thin)
-    dcf = compute_dcf(m, {"dcf": _dcf_cfg_for_criteria()}, fx=fx)
+    dcf = compute_dcf(m, {"dcf": _dcf_cfg_for_criteria(cfg)}, fx=fx)
     mos = dcf.margin_of_safety
     years = len(m.years)
     if mos != mos:
@@ -279,25 +326,67 @@ def calc_mos_base(m: TickerMetrics, cfg, fx) -> CriterionResult:
     return _result(mos, False, years, thin)
 
 
-def _dcf_cfg_for_criteria() -> dict:
-    """Minimal-Config fuer compute_dcf aus der globalen Config laden."""
-    try:
+_DCF_DEFAULTS = {
+    "discount_rate": 0.09, "terminal_growth": 0.025,
+    "base_growth_cap": 0.06, "bull_growth_multiplier": 1.3,
+    "bull_growth_cap": 0.10, "fade_to_growth": 0.025,
+}
+
+import logging as _logging
+_dcf_logger = _logging.getLogger("value_screener.criteria")
+
+
+def _dcf_cfg_for_criteria(cfg: dict | None = None) -> dict:
+    """DCF-Config fuer compute_dcf aus der uebergebenen Config (cfg['dcf']).
+
+    v65: UNTERSCHEIDET fehlende vs. ungueltige Konfiguration -- kein stiller
+    Fallback mehr, der eine fehlerhafte Config als gueltiges DCF-Ergebnis
+    erscheinen laesst:
+    - cfg ohne Block 'dcf' -> dokumentierte Defaults + WARNING im Log.
+    - ungueltige Werte (nicht numerisch, discount_rate <= 0,
+      terminal_growth < 0 oder >= discount_rate) -> ValueError.
+    """
+    if cfg is None:
         from config import load_config
-        return load_config()["dcf"]
-    except Exception:
-        return {
-            "discount_rate": 0.09, "terminal_growth": 0.025,
-            "base_growth_cap": 0.06, "bull_growth_multiplier": 1.3,
-            "bull_growth_cap": 0.10, "fade_to_growth": 0.025,
-        }
+        cfg = load_config()
+    dcfg = cfg.get("dcf")
+    if dcfg is None:
+        _dcf_logger.warning("DCF-Config fehlt (cfg['dcf']) -> dokumentierte Defaults %s", _DCF_DEFAULTS)
+        return dict(_DCF_DEFAULTS)
+    errors = []
+    def _num(key):
+        v = dcfg.get(key, _DCF_DEFAULTS.get(key))
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            errors.append(f"dcf.{key}={v!r} nicht numerisch")
+            return float("nan")
+    rate = _num("discount_rate")
+    tg = _num("terminal_growth")
+    for key in ("base_growth_cap", "bull_growth_cap", "bull_growth_multiplier", "fade_to_growth"):
+        _num(key)
+    if rate == rate and rate <= 0:
+        errors.append(f"dcf.discount_rate={rate} <= 0")
+    if tg == tg and tg < 0:
+        errors.append(f"dcf.terminal_growth={tg} < 0")
+    if rate == rate and tg == tg and tg >= rate:
+        errors.append(f"dcf.terminal_growth={tg} >= discount_rate={rate} (Terminalwert unmoeglich)")
+    if errors:
+        raise ValueError("ungueltige DCF-Konfiguration: " + "; ".join(errors))
+    return dict(dcfg)
 
 
-def calc_ev_ebit_vs_median(m: TickerMetrics, cfg, fx) -> CriterionResult:
-    """Aktuelles EV/EBIT im Verhaeltnis zum eigenen Median (Fenster 5 J.).
+def calc_ev_ebit_vs_hist_ebit(m: TickerMetrics, cfg, fx) -> CriterionResult:
+    """Aktuelles EV je historischem EBIT, ins Verhaeltnis zum eigenen Median (Fenster 5 J.).
 
-    EV = Marktkap. + Nettoverschuldung (Marktkap. in Quote-Waehrung,
-    Nettoverschuldung in Berichtswaehrung -> FX-Konvertierung noetig;
-    ohne Kurs n/a).
+    v65: Es gibt KEINE historischen Marktkapitalisierungen -- das EV wird mit der
+    HEUTIGEN Marktkap. fuer jedes Geschaeftsjahr gebildet. Damit ist dies KEIN
+    historischer EV/EBIT-Median, sondern "aktuelles EV / historisches EBIT"
+    (da das EV konstant ist, entspricht das Verhaeltnis current/median gerade
+    median(EBIT)/EBIT_aktuell -- Bewertung des aktuellen Gewinns gegen die eigene
+    Gewinn-Historie). Bezeichnung entsprechend angepasst.
+
+    EV = Marktkap. (heute) + Nettoverschuldung des jeweiligen FY (FX-konvertiert).
     """
     thin = cfg["thin_years"]
     years = _year_count(m, "ebit", "net_debt")
@@ -404,7 +493,7 @@ CRITERIA: dict[str, Calc] = {
     "revenue_cagr_5y": calc_revenue_cagr_5y,
     "fcf_yield_sbc_avg3": calc_fcf_yield_sbc_avg3,
     "mos_base": calc_mos_base,
-    "ev_ebit_vs_median": calc_ev_ebit_vs_median,
+    "ev_ebit_vs_hist_ebit": calc_ev_ebit_vs_hist_ebit,
 }
 
 # Sektor-spezifische Kriterien (werden je Gruppe in active_criteria aktiv)
@@ -455,6 +544,8 @@ def compute_criteria(m: TickerMetrics, cfg: dict, fx=None) -> dict[str, Criterio
         "trend_min_points": data_cfg.get("trend_min_points", 4),
         # Sektorregeln (Industry) an die Calc-Funktionen durchreichen
         "sector_rules": cfg.get("sector_rules", {}),
+        # v65: DCF-Block durchreichen (calc_mos_base validiert ihn, statt Defaults)
+        "dcf": cfg.get("dcf"),
     }
     crits = active_criteria(m, cfg)
     return {name: calc(m, calc_cfg, fx) for name, calc in crits.items()}

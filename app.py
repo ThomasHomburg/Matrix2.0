@@ -156,7 +156,7 @@ def page_ranking() -> None:
     q_rank = rank_rows(rows, "quality")
     view["Quality-Rang"] = view["ticker"].map(lambda t: "n/a" if q_rank.get(t) is None else str(q_rank[t]))
     view["ND/EBITDA"] = view["nd_ebitda"].map(lambda v: "n/a" if math.isnan(v) else f"{v:.2f}")
-    view["EV/EBIT rel."] = view["ev_ebit_med"].map(lambda v: "n/a" if math.isnan(v) else f"{v:.1f}")
+    view["EV/EBIT vs hist. EBIT"] = view["ev_ebit_med"].map(lambda v: "n/a" if math.isnan(v) else f"{v:.1f}")
     view["MoS (Base)"] = view.apply(
         lambda r: _fmt_mos(r["margin_of_safety"], bool(r.get("dcf_fcf_le0", False)),
                            bool(r.get("sector_special", False)),
