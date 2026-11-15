@@ -478,6 +478,10 @@ smart_money:
     - {name: "Harris Associates",                 cik: "0000813917", typ: qualitaet,   gewicht: 0.5, positions_soll_max: 100}
     - {name: "Starboard Value",                   cik: "0001517137", typ: aktivist,    gewicht: 0.0, positions_soll_max: 30}
     - {name: "Elliott Investment Management",     cik: "0001791786", typ: aktivist,    gewicht: 0.0, positions_soll_max: 30}
+    - {name: "fundsmith",  cik: "0001569205", typ: qualitaet,   gewicht: 1.0, positions_soll_max: 20}
+    - {name: "greenlight", cik: "0001079114", typ: deep_value,  gewicht: 1.0, positions_soll_max: 20}
+    - {name: "appaloosa",  cik: "0001656456", typ: makro,       gewicht: 1.0, positions_soll_max: 40}
+    - {name: "lone-pine",  cik: "0001061165", typ: qualitaet,   gewicht: 1.0, positions_soll_max: 20}
   max_requests_per_second: 5     ## SEC-Policy (wie sec.max_requests_per_second)
   retry_429: {warte_s: 5, versuche: 3}  ## Wiederholung bei HTTP 429
   quarters: 8                    ## letzte 8 Quartale 13F-HR je Fonds
