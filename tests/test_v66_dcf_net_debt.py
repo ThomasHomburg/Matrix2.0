@@ -42,7 +42,7 @@ DCF_CFG = {"dcf": {
 }}
 
 
-def _ticker(net_debt=..., total_debt=..., cash=..., mcap_cur="USD",
+def _ticker(net_debt=..., total_debt=..., cash=..., sti=..., mcap_cur="USD",
             nd_cur="USD") -> TickerMetrics:
     """Synthetischer Ticker; Bilanz-Felder nur, wenn explizit gegeben
     (net_debt=... = Feld fehlt komplett -> unbekannt)."""
@@ -60,8 +60,35 @@ def _ticker(net_debt=..., total_debt=..., cash=..., mcap_cur="USD",
             y["_total_debt"] = Metric("_total_debt", total_debt, nd_cur, nd_cur, fy)
         if cash is not ...:
             y["_cash"] = Metric("_cash", cash, nd_cur, nd_cur, fy)
+        if sti is not ...:
+            y["_short_term_investments"] = Metric(
+                "_short_term_investments", sti, nd_cur, nd_cur, fy)
         m.years[fy] = y
     return m
+
+
+def _ticker_ttm(total_debt=..., cash=..., sti=...) -> TickerMetrics:
+    """TTM-Ticker (fcf_basis="ttm" via fcf_mode="ttm_only"); Bilanz-Felder
+    nur, wenn explizit gegeben (unbekannt -> fehlt)."""
+    from data.ttm import TtmResult
+    m = _ticker()
+    ttm_metrics = {"fcf_sbc": Metric("fcf_sbc", 100.0, "USD", "USD", 2026)}
+    if total_debt is not ...:
+        ttm_metrics["_total_debt"] = Metric(
+            "_total_debt", total_debt, "USD", "USD", 2026)
+    if cash is not ...:
+        ttm_metrics["_cash"] = Metric("_cash", cash, "USD", "USD", 2026)
+    if sti is not ...:
+        ttm_metrics["_short_term_investments"] = Metric(
+            "_short_term_investments", sti, "USD", "USD", 2026)
+    m.ttm = TtmResult(ttm=ttm_metrics, quarter_end="2026-06-30",
+                      base_label="TTM bis 2026-06", plausible=True)
+    m.ttm_plausible = True
+    m.ttm_fallback = False
+    return m
+
+
+INCL_STI_CFG = {"dcf": dict(DCF_CFG["dcf"], net_debt_mode="incl_sti")}
 
 
 # ---------- (1) Bekannte Nettoverschuldung von exakt null ----------
@@ -164,8 +191,11 @@ def test_alt_net_debt_nan_when_unknown():
 
 
 def test_alt_net_debt_computed_when_known():
-    res = compute_dcf(_ticker(net_debt=200.0, total_debt=500.0, cash=100.0), DCF_CFG)
-    assert res.net_debt_alt == pytest.approx(400.0)
+    """Aktiv 'reported' (ND 200), alternative Basis incl_sti vollstaendig
+    (500 - (100 + 50) = 350) -> mos_base_alt berechenbar."""
+    res = compute_dcf(_ticker(net_debt=200.0, total_debt=500.0, cash=100.0,
+                              sti=50.0), DCF_CFG)
+    assert res.net_debt_alt == pytest.approx(350.0)
     assert res.mos_base_alt == res.mos_base_alt  # berechenbar, nicht NaN
 
 
@@ -244,3 +274,89 @@ def test_known_zero_distinct_from_nan():
     assert rna.net_debt_known is False and rna.net_debt_status == "unbekannt"
     assert r0.margin_of_safety == r0.margin_of_safety
     assert math.isnan(rna.margin_of_safety)
+
+
+# ---------- (13) incl_sti: Vollstaendigkeit der Bestandteile (Randfall) ----------
+# Total Debt - (Cash + kurzfr. Anlagen) darf nur gerechnet werden, wenn ALLE
+# Bestandteile bekannt sind; fehlende Bestandteile werden nie als 0 eingesetzt.
+
+def test_incl_sti_cash_missing_returns_nan():
+    """Total Debt 500, kurzfr. Anlagen 100, Cash fehlt -> KEIN 400 (Cash != 0);
+    ohne andere vollstaendige Basis: NaN + Status unvollstaendig."""
+    res = compute_dcf(_ticker(total_debt=500.0, sti=100.0), INCL_STI_CFG)
+    assert math.isnan(res.net_debt)
+    assert res.net_debt_known is False
+    assert res.net_debt_status == "unvollstaendig"
+    assert math.isnan(res.margin_of_safety)
+
+
+def test_incl_sti_sti_missing_falls_back_to_total_debt_minus_cash():
+    """Total Debt 500, Cash 200, kurzfr. Anlagen fehlen -> incl_sti nicht
+    berechenbar; Rueckfall auf die vollstaendige Basis total_debt - cash = 300
+    (andere vollstaendige und gueltige Datenbasis, transparente Quelle)."""
+    res = compute_dcf(_ticker(total_debt=500.0, cash=200.0), INCL_STI_CFG)
+    assert res.net_debt == pytest.approx(300.0)
+    assert res.net_debt_known is True
+    assert "total_debt - cash" in res.net_debt_source
+    assert res.net_debt_status == "bekannt_positiv"
+
+
+def test_incl_sti_all_components_known():
+    """Total Debt 500, Cash 200, kurzfr. Anlagen 50 -> 500 - 250 = 250."""
+    res = compute_dcf(_ticker(total_debt=500.0, cash=200.0, sti=50.0), INCL_STI_CFG)
+    assert res.net_debt == pytest.approx(250.0)
+    assert res.net_debt_known is True
+    assert "kurzfr. Anlagen" in res.net_debt_source
+
+
+def test_incl_sti_known_zero_cash():
+    """Bekanntes Cash = 0 (nicht NaN!) ist zulaessig: 500 - (0 + 100) = 400."""
+    res = compute_dcf(_ticker(total_debt=500.0, cash=0.0, sti=100.0), INCL_STI_CFG)
+    assert res.net_debt == pytest.approx(400.0)
+    assert res.net_debt_known is True
+    assert res.net_debt_status == "bekannt_positiv"
+
+
+def test_incl_sti_known_zero_sti():
+    """Bekannte kurzfr. Anlagen = 0 sind zulaessig: 500 - (200 + 0) = 300."""
+    res = compute_dcf(_ticker(total_debt=500.0, cash=200.0, sti=0.0), INCL_STI_CFG)
+    assert res.net_debt == pytest.approx(300.0)
+    assert res.net_debt_known is True
+
+
+def test_incl_sti_ttm_cash_missing_returns_nan():
+    """TTM: Total Debt 500, kurzfr. Anlagen 100, Cash fehlt -> NaN (kein 400),
+    Status unvollstaendig."""
+    res = compute_dcf(_ticker_ttm(total_debt=500.0, sti=100.0), INCL_STI_CFG,
+                      fcf_mode="ttm_only")
+    assert res.fcf_basis == "ttm"
+    assert math.isnan(res.net_debt)
+    assert res.net_debt_known is False
+    assert res.net_debt_status == "unvollstaendig"
+
+
+def test_incl_sti_ttm_sti_missing_falls_back():
+    """TTM: Total Debt 500, Cash 200, kurzfr. Anlagen fehlen -> Rueckfall auf
+    total_debt - cash = 300 (vollstaendige alternative Basis)."""
+    res = compute_dcf(_ticker_ttm(total_debt=500.0, cash=200.0), INCL_STI_CFG,
+                      fcf_mode="ttm_only")
+    assert res.net_debt == pytest.approx(300.0)
+    assert res.net_debt_known is True
+    assert "total_debt - cash" in res.net_debt_source
+
+
+def test_incl_sti_ttm_all_components_known():
+    """TTM: alle Bestandteile bekannt -> 500 - (200 + 50) = 250."""
+    res = compute_dcf(_ticker_ttm(total_debt=500.0, cash=200.0, sti=50.0),
+                       INCL_STI_CFG, fcf_mode="ttm_only")
+    assert res.net_debt == pytest.approx(250.0)
+    assert res.net_debt_known is True
+    assert "TTM" in res.net_debt_source
+
+
+def test_incl_sti_ttm_known_zero_cash():
+    """TTM: bekanntes Cash = 0 ist zulaessig: 500 - (0 + 100) = 400."""
+    res = compute_dcf(_ticker_ttm(total_debt=500.0, cash=0.0, sti=100.0),
+                       INCL_STI_CFG, fcf_mode="ttm_only")
+    assert res.net_debt == pytest.approx(400.0)
+    assert res.net_debt_known is True

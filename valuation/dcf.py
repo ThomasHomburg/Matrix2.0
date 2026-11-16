@@ -289,23 +289,31 @@ def _net_debt_ex_customer_deposits(m: TickerMetrics, fcf_basis: str,
         cd = cd_m.value if (cd_m is not None and not cd_m.is_na()) else nan
         cur = (nd_m.currency if nd_m is not None and not nd_m.is_na()
                else (td_m.currency if td_m is not None and not td_m.is_na() else ""))
-        if net_debt_mode == "incl_sti" and td_m is not None and not td_m.is_na():
-            liquid = 0.0
-            if cash_m is not None and not cash_m.is_na():
-                liquid += cash_m.value
-            if sti_m is not None and not sti_m.is_na():
-                liquid += sti_m.value
-            if liquid > 0 or (cash_m is not None and not cash_m.is_na()):
-                adj = td_m.value - liquid + (cd if cd == cd else 0.0)
-                src = (f"TTM (Stichtag {ttm.quarter_end}) "
-                       f"Total Debt − (Cash + kurzfr. Anlagen)"
-                       + (" + Kundengelder" if cd == cd else ""))
-                return adj, src, cd, cur, "ok"
+        if (net_debt_mode == "incl_sti" and td_m is not None and not td_m.is_na()
+                and cash_m is not None and not cash_m.is_na()
+                and sti_m is not None and not sti_m.is_na()):
+            # v66: alle Bestandteile muessen bekannt sein (Total Debt, Cash,
+            # kurzfr. Anlagen); ein fehlender Bestandteil wird nie als 0
+            # eingesetzt -- bekannte 0 ist dagegen zulaessig.
+            liquid = cash_m.value + sti_m.value
+            adj = td_m.value - liquid + (cd if cd == cd else 0.0)
+            src = (f"TTM (Stichtag {ttm.quarter_end}) "
+                   f"Total Debt − (Cash + kurzfr. Anlagen)"
+                   + (" + Kundengelder" if cd == cd else ""))
+            return adj, src, cd, cur, "ok"
         if nd_m is not None and not nd_m.is_na():
             adj = nd_m.value + cd if cd == cd else nd_m.value
             src = (f"TTM (Stichtag {ttm.quarter_end})"
                    + (" + Kundengelder" if cd == cd else ""))
             return adj, src, cd, nd_m.currency, "ok"
+        # v66: wie im Jahres-Zweig -- Rueckfall auf die vollstaendige Basis
+        # total_debt - cash (nur wenn BEIDE bekannt sind)
+        if (td_m is not None and not td_m.is_na()
+                and cash_m is not None and not cash_m.is_na()):
+            adj = td_m.value - cash_m.value + (cd if cd == cd else 0.0)
+            src = (f"TTM (Stichtag {ttm.quarter_end}) total_debt - cash"
+                   + (" + Kundengelder" if cd == cd else ""))
+            return adj, src, cd, td_m.currency, "ok"
     for fy in sorted(m.years, reverse=True):
         y = m.years[fy]
         nd = y.get("net_debt")
@@ -316,17 +324,17 @@ def _net_debt_ex_customer_deposits(m: TickerMetrics, fcf_basis: str,
         if nd is not None or td is not None or cash is not None:
             saw_balance = True
         cd_v = cd.value if (cd is not None and not cd.is_na()) else nan
-        if net_debt_mode == "incl_sti" and td is not None and not td.is_na():
-            liquid = 0.0
-            if cash is not None and not cash.is_na():
-                liquid += cash.value
-            if sti is not None and not sti.is_na():
-                liquid += sti.value
-            if liquid > 0 or (cash is not None and not cash.is_na()):
-                adj = td.value - liquid + (cd_v if cd_v == cd_v else 0.0)
-                src = (f"FY{fy} Total Debt − (Cash + kurzfr. Anlagen)"
-                       + (" + Kundengelder" if cd_v == cd_v else ""))
-                return adj, src, cd_v, td.currency, "ok"
+        if (net_debt_mode == "incl_sti" and td is not None and not td.is_na()
+                and cash is not None and not cash.is_na()
+                and sti is not None and not sti.is_na()):
+            # v66: alle Bestandteile muessen bekannt sein (Total Debt, Cash,
+            # kurzfr. Anlagen); ein fehlender Bestandteil wird nie als 0
+            # eingesetzt -- bekannte 0 ist dagegen zulaessig.
+            liquid = cash.value + sti.value
+            adj = td.value - liquid + (cd_v if cd_v == cd_v else 0.0)
+            src = (f"FY{fy} Total Debt − (Cash + kurzfr. Anlagen)"
+                   + (" + Kundengelder" if cd_v == cd_v else ""))
+            return adj, src, cd_v, td.currency, "ok"
         if nd is not None and not nd.is_na():
             adj = nd.value + cd_v if cd_v == cd_v else nd.value
             src = f"FY{fy} net_debt" + (" + Kundengelder" if cd_v == cd_v else "")
