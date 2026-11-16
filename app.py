@@ -986,6 +986,18 @@ def dcf_section(m: TickerMetrics, row: dict | None) -> None:
             nd_s += f" (exkl. Kundengelder {dcf.customer_deposits / 1e9:,.2f} Mrd.)"
         if dcf.net_debt_source:
             nd_s += f" · {dcf.net_debt_source}"
+    # v66: Nettoverschuldung unbekannt -> DCF/MoS n/a (Datenqualitaet,
+    # kein Qualitaetsurteil); der Wert je Aktie wird NICHT aus dem EV
+    # ohne Schuldenabzug genaehert.
+    if not dcf.net_debt_known:
+        nd_status_s = {
+            "unbekannt": "unbekannt (keine Bilanzdaten)",
+            "unvollstaendig": "unvollständig (Bilanzdaten nicht kombinierbar)",
+            "fx_fehlgeschlagen": "nicht in Marktkap.-Währung konvertierbar",
+        }.get(dcf.net_debt_status, "unbekannt")
+        st.warning("Nettoverschuldung " + nd_status_s
+                   + " — DCF/innerer Wert/MoS n/a (Datenqualität, "
+                   "kein Qualitätsurteil).")
     nd_alt_val = dcf.net_debt_alt
     nd_alt_s = "n/a"
     if nd_alt_val == nd_alt_val:

@@ -203,6 +203,14 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict) -> dict:
                          if compute_dcf(m, cfg, fcf_mode=k).fcf_le0] if not special else []
             if dcf.fcf_le0:
                 missing.append(f"Start-FCF ≤ 0 im Modus {mode_names.get(dcf.fcf_mode, dcf.fcf_mode)}")
+            elif not special and not dcf.net_debt_known and dcf.fcf_normalized == dcf.fcf_normalized:
+                # v66: DCF n/a wegen unbekannter Nettoverschuldung --
+                # Datenqualitaetsproblem, KEINE Aussage ueber die Unternehmensqualitaet
+                nd_label = {"unbekannt": "unbekannt",
+                            "unvollstaendig": "unvollständig (Bilanzdaten nicht kombinierbar)",
+                            "fx_fehlgeschlagen": "nicht in Marktkap.-Währung konvertierbar"}.get(
+                               dcf.net_debt_status, "unbekannt")
+                missing.append(f"Nettoverschuldung {nd_label} -- DCF n/a (Datenqualität)")
             elif le0_modes:
                 missing.append(f"Start-FCF ≤ 0 im Modus {', '.join(le0_modes)}")
             else:
@@ -487,6 +495,15 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict) -> dict:
                        "Schulden-Cash ab -> Flag 'ND != Schulden - Cash'",
                        m.ticker, float(cfg.get("consistency", {}).get("net_debt_mcap_share", 0.05)) * 100)
 
+    # v66: Nettoverschuldung unbekannt/nicht konvertierbar -> DCF nicht belastbar.
+    # Datenqualitaets-Flag (kein Qualitaetsurteil); greift nur, wenn ein FCF
+    # vorhanden ist und der DCF daher gerechnet werden koennte.
+    if (not special and not dcf.net_debt_known
+            and dcf.fcf_normalized == dcf.fcf_normalized and not dcf.fcf_le0):
+        flag_parts.append("wert:nd_unbekannt")
+        logger.warning("%s: Nettoverschuldung %s -- DCF/MoS n/a (Datenqualität, "
+                       "kein Qualitätsurteil)", m.ticker, dcf.net_debt_status)
+
     # v61 Sanity-Guard: extreme MoS / Wert je Aktie nahe null (Grenzen aus config sanity)
     mos_v = dcf.margin_of_safety
     iv_base_v = (dcf.scenarios["base"].value_per_share
@@ -602,6 +619,8 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict) -> dict:
         "dcf_fcf_sources": dcf.fcf_sources,
         "dcf_net_debt": dcf.net_debt,
         "dcf_net_debt_source": dcf.net_debt_source,
+        "dcf_net_debt_known": dcf.net_debt_known,
+        "dcf_net_debt_status": dcf.net_debt_status,
         "dcf_customer_deposits": dcf.customer_deposits,
         "dcf_fcf_mode": dcf.fcf_mode,
         "ttm_plausible": getattr(m, "ttm_plausible", True),

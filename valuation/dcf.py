@@ -65,6 +65,8 @@ class DcfResult:
     net_debt_mode: str = "reported"  # "reported" (gemeldet) | "incl_sti" (Schulden − (Cash+kurzfr.Anl.))
     net_debt_alt: float = float("nan")  # alternative Nettoverschuldung (anderer Modus, Berichtsw.)
     net_debt_alt_source: str = ""    # Quelle der alternativen Nettoverschuldung
+    net_debt_known: bool = False      # v66: True nur bei bekannter UND in Marktkap.-Waehrung konvertierbarer Nettoverschuldung (inkl. bekanntem Wert 0)
+    net_debt_status: str = "unbekannt"  # v66: bekannt_null | bekannt_positiv | bekannt_negativ | unbekannt | unvollstaendig | fx_fehlgeschlagen
     mos_base_alt: float = float("nan")   # MoS (Base) mit alternativer Nettoverschuldung
     scenario_growth: dict = field(default_factory=dict)  # {"bear": g5, "base": g5, "bull": g5}
 
@@ -101,9 +103,13 @@ def _dcf_scenario(name: str, g5: float, g_terminal: float, rate: float,
 
     Unternehmenswert (EV) = Barwert FCFs + Barwert Terminal Value.
     Innerer Wert (Equity) = EV - Nettoverschuldung (ohne Kundengelder).
-    Wert je Aktie = Innerer Wert / Aktien. Nettoverschuldung unbekannt
-    (NaN) -> Wert je Aktie = EV / Aktien (alte, rueckwaertskompatible
-    Behandlung, damit alte Tests ohne Bilanzdaten weiterlaufen).
+    Wert je Aktie = Innerer Wert / Aktien.
+
+    v66: Nettoverschuldung unbekannt (NaN) -> Equity/Wert je Aktie NaN.
+    Eine unbekannte Nettoverschuldung wird NIEMALS wie null behandelt
+    (CLAUDE.md: fehlende Daten als NaN, nie als 0); der DCF ist dann
+    nicht belastbar. Ein bekannter Wert von exakt 0 ist dagegen ein
+    valider bekannter Wert (Equity = EV).
     """
     nan = float("nan")
     rates = _growth_path(g5, g_terminal, dcfg)
@@ -118,7 +124,7 @@ def _dcf_scenario(name: str, g5: float, g_terminal: float, rate: float,
     if net_debt == net_debt:
         equity = ev - net_debt if ev == ev else nan
     else:
-        equity = ev  # Nettoverschuldung unbekannt -> EV als Naeherung (alt)
+        equity = nan  # Nettoverschuldung unbekannt -> DCF nicht belastbar (v66)
     vps = equity / shares if (equity == equity and shares == shares) else nan
     return DcfScenario(
         name=name, growth_rates=rates, fcfs=fcfs, pv_fcfs=pv_fcfs,
@@ -263,9 +269,14 @@ def _net_debt_ex_customer_deposits(m: TickerMetrics, fcf_basis: str,
 
     Prioritaet: TTM-Bestand (Stichtag letztes Quartal) falls fcf_basis="ttm",
     sonst das neueste Geschaeftsjahr mit Bilanzdaten.
-    Rueckgabe: (wert, quelle, kundengelder, waehrung).
+    Rueckgabe: (wert, quelle, kundengelder, waehrung, qualitaet).
+    qualitaet (v66): "ok" | "fehlend" (keine Bilanzdaten zu ND/Schulden/Cash)
+    | "unvollstaendig" (Bilanzdaten vorhanden, aber nicht kombinierbar,
+    z. B. Total Debt ohne Cash). Ein bekannter Wert von 0 ist "ok" und
+    von NaN zu unterscheiden.
     """
     nan = float("nan")
+    saw_balance = False  # irgendein Bilanz-Feld (net_debt/_total_debt/_cash) vorhanden
     ttm = getattr(m, "ttm", None)
     if fcf_basis == "ttm" and ttm is not None:
         nd_m = ttm.ttm.get("net_debt")
@@ -273,6 +284,8 @@ def _net_debt_ex_customer_deposits(m: TickerMetrics, fcf_basis: str,
         td_m = ttm.ttm.get("_total_debt")
         cash_m = ttm.ttm.get("_cash")
         sti_m = ttm.ttm.get("_short_term_investments")
+        if nd_m is not None or td_m is not None or cash_m is not None:
+            saw_balance = True
         cd = cd_m.value if (cd_m is not None and not cd_m.is_na()) else nan
         cur = (nd_m.currency if nd_m is not None and not nd_m.is_na()
                else (td_m.currency if td_m is not None and not td_m.is_na() else ""))
@@ -287,12 +300,12 @@ def _net_debt_ex_customer_deposits(m: TickerMetrics, fcf_basis: str,
                 src = (f"TTM (Stichtag {ttm.quarter_end}) "
                        f"Total Debt − (Cash + kurzfr. Anlagen)"
                        + (" + Kundengelder" if cd == cd else ""))
-                return adj, src, cd, cur
+                return adj, src, cd, cur, "ok"
         if nd_m is not None and not nd_m.is_na():
             adj = nd_m.value + cd if cd == cd else nd_m.value
             src = (f"TTM (Stichtag {ttm.quarter_end})"
                    + (" + Kundengelder" if cd == cd else ""))
-            return adj, src, cd, nd_m.currency
+            return adj, src, cd, nd_m.currency, "ok"
     for fy in sorted(m.years, reverse=True):
         y = m.years[fy]
         nd = y.get("net_debt")
@@ -300,6 +313,8 @@ def _net_debt_ex_customer_deposits(m: TickerMetrics, fcf_basis: str,
         td = y.get("_total_debt")
         cash = y.get("_cash")
         sti = y.get("_short_term_investments")
+        if nd is not None or td is not None or cash is not None:
+            saw_balance = True
         cd_v = cd.value if (cd is not None and not cd.is_na()) else nan
         if net_debt_mode == "incl_sti" and td is not None and not td.is_na():
             liquid = 0.0
@@ -311,17 +326,18 @@ def _net_debt_ex_customer_deposits(m: TickerMetrics, fcf_basis: str,
                 adj = td.value - liquid + (cd_v if cd_v == cd_v else 0.0)
                 src = (f"FY{fy} Total Debt − (Cash + kurzfr. Anlagen)"
                        + (" + Kundengelder" if cd_v == cd_v else ""))
-                return adj, src, cd_v, td.currency
+                return adj, src, cd_v, td.currency, "ok"
         if nd is not None and not nd.is_na():
             adj = nd.value + cd_v if cd_v == cd_v else nd.value
             src = f"FY{fy} net_debt" + (" + Kundengelder" if cd_v == cd_v else "")
-            return adj, src, cd_v, nd.currency
+            return adj, src, cd_v, nd.currency, "ok"
         if (td is not None and not td.is_na()
                 and cash is not None and not cash.is_na()):
             adj = td.value - cash.value + (cd_v if cd_v == cd_v else 0.0)
             src = f"FY{fy} total_debt - cash" + (" + Kundengelder" if cd_v == cd_v else "")
-            return adj, src, cd_v, td.currency
-    return nan, "n/a", nan, ""
+            return adj, src, cd_v, td.currency, "ok"
+    quality = "unvollstaendig" if saw_balance else "fehlend"
+    return nan, "n/a", nan, "", quality
 
 
 def compute_dcf(m: TickerMetrics, cfg: dict, fx=None, fcf_mode: str | None = None) -> DcfResult:
@@ -340,8 +356,8 @@ def compute_dcf(m: TickerMetrics, cfg: dict, fx=None, fcf_mode: str | None = Non
 
     Innerer Wert (Equity) = Unternehmenswert (Barwert FCFs + Barwert
     Terminal Value) - Nettoverschuldung OHNE Kundengelder. Wert je Aktie =
-    Innerer Wert / Aktien. Nettoverschuldung unbekannt (NaN) -> EV als
-    Naeherung (rueckwaertskompatibel).
+    Innerer Wert / Aktien. Nettoverschuldung unbekannt (NaN) -> DCF nicht
+    belastbar: Wert je Aktie/MoS = NaN (v66).
     """
     dcfg = cfg["dcf"]
     nan = float("nan")
@@ -446,9 +462,9 @@ def compute_dcf(m: TickerMetrics, cfg: dict, fx=None, fcf_mode: str | None = Non
         nd_mode = "reported"
     result.net_debt_mode = nd_mode
     alt_mode = "incl_sti" if nd_mode == "reported" else "reported"
-    nd_rep, nd_src, cd_val, nd_cur = _net_debt_ex_customer_deposits(
+    nd_rep, nd_src, cd_val, nd_cur, nd_qual = _net_debt_ex_customer_deposits(
         m, result.fcf_basis, net_debt_mode=nd_mode)
-    nd_alt, nd_alt_src, _cd_alt, nd_alt_cur = _net_debt_ex_customer_deposits(
+    nd_alt, nd_alt_src, _cd_alt, nd_alt_cur, _nd_alt_qual = _net_debt_ex_customer_deposits(
         m, result.fcf_basis, net_debt_mode=alt_mode)
     result.net_debt = nd_rep
     result.net_debt_source = nd_src
@@ -461,6 +477,25 @@ def compute_dcf(m: TickerMetrics, cfg: dict, fx=None, fcf_mode: str | None = Non
     nd_alt_conv = nan
     if nd_alt == nd_alt and nd_alt_cur:
         nd_alt_conv = converter.convert(nd_alt, nd_alt_cur, mcap.currency, latest_fy)
+
+    # v66: Status der Nettoverschuldung -- bekannt (inkl. exakt 0) vs.
+    # unbekannt vs. unvollstaendig vs. FX-Konvertierung fehlgeschlagen.
+    # Eine unbekannte Nettoverschuldung wird nie wie null behandelt; der
+    # DCF ist dann nicht belastbar (Equity/Wert je Aktie/MoS = NaN).
+    if nd_conv == nd_conv:
+        result.net_debt_known = True
+        if nd_conv == 0.0:
+            result.net_debt_status = "bekannt_null"
+        elif nd_conv > 0:
+            result.net_debt_status = "bekannt_positiv"
+        else:
+            result.net_debt_status = "bekannt_negativ"
+    elif nd_rep == nd_rep:
+        result.net_debt_status = "fx_fehlgeschlagen"
+    elif nd_qual == "unvollstaendig":
+        result.net_debt_status = "unvollstaendig"
+    else:
+        result.net_debt_status = "unbekannt"
 
     for name, g5 in (("bear", g_bear), ("base", g_base), ("bull", g_bull)):
         if result.fcf_le0:
@@ -558,7 +593,7 @@ def sensitivity_mos_base(m: TickerMetrics, cfg: dict, current_price: float | Non
     nd_mode = str(dcfg.get("net_debt_mode", "reported")).lower()
     if nd_mode not in ("reported", "incl_sti"):
         nd_mode = "reported"
-    nd_rep, _nd_src, _cd, nd_cur = _net_debt_ex_customer_deposits(
+    nd_rep, _nd_src, _cd, nd_cur, _nd_qual = _net_debt_ex_customer_deposits(
         m, base_res.fcf_basis, net_debt_mode=nd_mode)
     nd_conv = float("nan")
     if nd_rep == nd_rep and nd_cur:
