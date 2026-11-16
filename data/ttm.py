@@ -19,6 +19,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from datetime import date
+from typing import Any
 
 from data.loader import Metric, TickerMetrics
 
@@ -260,3 +261,75 @@ def ttm_metrics_into_years(m: TickerMetrics, ttm: TtmResult) -> TickerMetrics:
                              m.market_cap.currency if m.market_cap else "USD", fy)
     m.years[fy] = ym
     return m
+
+
+# ---------- v64: Serialisierung (Resume-Cache run_ranking.py) ----------
+
+_QUARTER_NUM_KEYS = ("operating_cashflow", "capex", "stock_based_compensation",
+                     "fcf_sbc", "yoy")
+
+
+def _num_to_json(v: float):
+    """NaN/Infinity -> null (CLAUDE.md: fehlende Daten nie als 0)."""
+    if v is None:
+        return None
+    try:
+        return v if math.isfinite(v) else None
+    except TypeError:
+        return None
+
+
+def _num_from_json(v) -> float:
+    try:
+        return float("nan") if v is None else float(v)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def ttm_to_dict(res: TtmResult) -> dict:
+    """TtmResult als JSON-faehiges Dict (Round-trip via ttm_from_dict)."""
+    from data.loader import metric_to_dict
+    return {
+        "ttm": {k: metric_to_dict(v) for k, v in res.ttm.items()},
+        "quarter_end": res.quarter_end,
+        "base_label": res.base_label,
+        "plausible": res.plausible,
+        "deviation": _num_to_json(res.deviation),
+        "fall_back_to_annual": res.fall_back_to_annual,
+        "checks": list(res.checks),
+        "quarters": [{**q, **{k: _num_to_json(q.get(k)) for k in _QUARTER_NUM_KEYS}}
+                     for q in res.quarters],
+        "quarters_currency": res.quarters_currency,
+    }
+
+
+def ttm_from_dict(data: Any) -> TtmResult:
+    """Rekonstruiert TtmResult aus ttm_to_dict()-Ausgabe; null -> NaN.
+
+    ValueError bei strukturell ungueltigen Dicts (Aufrufer laedt neu).
+    """
+    from data.loader import metric_from_dict
+    if not isinstance(data, dict) or not isinstance(data.get("ttm"), dict):
+        raise ValueError("TtmResult: ttm fehlt/ungueltig")
+    res = TtmResult()
+    res.ttm = {str(k): metric_from_dict(v) for k, v in data["ttm"].items()}
+    res.quarter_end = str(data.get("quarter_end") or "")
+    res.base_label = str(data.get("base_label") or "")
+    res.plausible = bool(data.get("plausible", True))
+    res.deviation = _num_from_json(data.get("deviation"))
+    res.fall_back_to_annual = bool(data.get("fall_back_to_annual") or False)
+    checks = data.get("checks")
+    res.checks = [str(c) for c in checks] if isinstance(checks, list) else []
+    quarters = data.get("quarters")
+    if quarters is not None:
+        if not isinstance(quarters, list):
+            raise ValueError("TtmResult: quarters ungueltig")
+        for q in quarters:
+            if not isinstance(q, dict):
+                raise ValueError("TtmResult: Quartal ungueltig")
+            entry = {k: q.get(k) for k in q if k not in _QUARTER_NUM_KEYS}
+            for k in _QUARTER_NUM_KEYS:
+                entry[k] = _num_from_json(q.get(k))
+            res.quarters.append(entry)
+    res.quarters_currency = str(data.get("quarters_currency") or "")
+    return res

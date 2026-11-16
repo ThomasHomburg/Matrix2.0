@@ -15,6 +15,36 @@ from .fmp_client import FMPClient
 YEARS = 5
 
 
+def metric_to_dict(m: Metric) -> dict[str, Any]:
+    """Metric als JSON-faehiges Dict; NaN/Infinity -> null (nie 0)."""
+    return {
+        "name": m.name,
+        "value": m.value if math.isfinite(m.value) else None,
+        "unit": m.unit,
+        "currency": m.currency,
+        "fiscal_year": m.fiscal_year,
+    }
+
+
+def metric_from_dict(data: Any) -> Metric:
+    """Metric aus metric_to_dict()-Ausgabe; null -> NaN.
+
+    ValueError bei strukturell ungueltigen Dicts (Aufrufer laedt neu).
+    """
+    if not isinstance(data, dict):
+        raise ValueError("Metric: kein Dict")
+    name = data.get("name")
+    if not isinstance(name, str):
+        raise ValueError("Metric: name fehlt")
+    raw = data.get("value")
+    try:
+        value = float("nan") if raw is None else float(raw)
+    except (TypeError, ValueError):
+        value = float("nan")
+    return Metric(name, value, str(data.get("unit") or ""),
+                  str(data.get("currency") or ""), int(data.get("fiscal_year") or 0))
+
+
 @dataclass
 class Metric:
     name: str
@@ -55,6 +85,86 @@ class TickerMetrics:
     # Exaktes Geschaeftsjahres-Enddatum je Jahr (ISO) -- fuer die TTM-Basis
     # (nicht ueberlappende Geschaeftsjahre vor dem TTM-Fenster).
     fiscal_ends: dict[int, str] = field(default_factory=dict)
+
+    # ---------- v64: Serialisierung (Resume-Cache run_ranking.py) ----------
+
+    def to_dict(self) -> dict[str, Any]:
+        """Vollstaendige Serialisierung fuer den Resume-Cache (JSON-faehig).
+
+        NaN/Infinity werden als null gespeichert (CLAUDE.md: fehlende Daten nie
+        als 0), from_dict() macht daraus wieder NaN.
+        """
+        from data.ttm import ttm_to_dict
+        return {
+            "ticker": self.ticker,
+            "name": self.name,
+            "sector": self.sector,
+            "industry": self.industry,
+            "country": self.country,
+            "source": self.source,
+            "extras": {k: metric_to_dict(v) for k, v in self.extras.items()},
+            "market_cap": metric_to_dict(self.market_cap) if self.market_cap else None,
+            "market_cap_date": self.market_cap_date,
+            "price": metric_to_dict(self.price) if self.price else None,
+            "price_date": self.price_date,
+            "next_earnings_date": self.next_earnings_date,
+            "years": {fy: {n: metric_to_dict(m) for n, m in y.items()}
+                      for fy, y in self.years.items()},
+            "ebitda_unplausible": self.ebitda_unplausible,
+            "ttm": ttm_to_dict(self.ttm) if self.ttm is not None else None,
+            "ttm_plausible": self.ttm_plausible,
+            "ttm_fallback": self.ttm_fallback,
+            "fiscal_ends": {int(fy): d for fy, d in self.fiscal_ends.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "TickerMetrics":
+        """Rekonstruiert TickerMetrics aus to_dict()-Ausgabe.
+
+        ValueError bei unvollstaendigen/struktur-invaliden Datensaetzen -- der
+        Aufrufer (Resume-Cache) laedt solche Ticker dann neu.
+        """
+        from data.ttm import ttm_from_dict
+        if not isinstance(data, dict):
+            raise ValueError("Kein Dict")
+        ticker = data.get("ticker")
+        if not isinstance(ticker, str) or not ticker:
+            raise ValueError("ticker fehlt")
+        years_raw = data.get("years")
+        if not isinstance(years_raw, dict):
+            raise ValueError("years fehlt/ungueltig")
+        m = cls(ticker=ticker)
+        m.name = str(data.get("name") or "")
+        m.sector = str(data.get("sector") or "")
+        m.industry = str(data.get("industry") or "")
+        m.country = str(data.get("country") or "")
+        m.source = str(data.get("source") or "")
+        extras = data.get("extras")
+        if extras:
+            if not isinstance(extras, dict):
+                raise ValueError("extras ungueltig")
+            m.extras = {str(k): metric_from_dict(v) for k, v in extras.items()}
+        m.market_cap = (metric_from_dict(data["market_cap"])
+                        if data.get("market_cap") else None)
+        m.market_cap_date = str(data.get("market_cap_date") or "")
+        m.price = metric_from_dict(data["price"]) if data.get("price") else None
+        m.price_date = str(data.get("price_date") or "")
+        m.next_earnings_date = str(data.get("next_earnings_date") or "")
+        for fy, y in years_raw.items():
+            if not isinstance(y, dict):
+                raise ValueError(f"Jahr {fy} ungueltig")
+            m.years[int(fy)] = {str(n): metric_from_dict(v) for n, v in y.items()}
+        m.ebitda_unplausible = bool(data.get("ebitda_unplausible") or False)
+        ttm_raw = data.get("ttm")
+        m.ttm = ttm_from_dict(ttm_raw) if ttm_raw else None
+        m.ttm_plausible = bool(data.get("ttm_plausible", True))
+        m.ttm_fallback = bool(data.get("ttm_fallback") or False)
+        fiscal = data.get("fiscal_ends")
+        if fiscal:
+            if not isinstance(fiscal, dict):
+                raise ValueError("fiscal_ends ungueltig")
+            m.fiscal_ends = {int(fy): str(d) for fy, d in fiscal.items()}
+        return m
 
     def series(self, metric_name: str) -> list[Metric]:
         """Kennzahl chronologisch (aeltestes Jahr zuerst)."""

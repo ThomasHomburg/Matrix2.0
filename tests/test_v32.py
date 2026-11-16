@@ -93,25 +93,36 @@ def test_batched_run_errors_do_not_stop(tmp_path, monkeypatch, cfg):
     assert len(calls) == 5  # alle versucht, Fehler stoppen nicht
     assert sleeps == [0.5, 0.5]  # Pause zwischen den 3 Batches (nicht nach letztem)
     cache = json.loads((tmp_path / "cache.json").read_text(encoding="utf-8"))
-    assert cache["T1"]["status"] == "ok"
-    assert cache["BAD1"]["status"] == "fehler" and "boom BAD1" in cache["BAD1"]["error"]
+    assert cache["version"] == run_ranking.CACHE_VERSION
+    assert cache["entries"]["T1"]["status"] == "ok"
+    assert cache["entries"]["BAD1"]["status"] == "fehler" and "boom BAD1" in cache["entries"]["BAD1"]["error"]
 
 
-def test_batched_run_resume_skips_ok(tmp_path, monkeypatch, cfg):
+def test_batched_run_resume_restores_ok(tmp_path, monkeypatch, cfg):
+    """v64: Ticker mit Cache-Status ok + Datenblock werden aus dem Cache
+    rekonstruiert (kein erneuter Provider-Abruf) und tauchen in companies auf;
+    Ticker mit Status fehler werden wiederholt. Gespeicherte Fehler bleiben
+    erhalten, wenn der Retry erneut scheitert."""
     cfg = dict(cfg)
     cfg["sec"] = {"enabled": False}
-    cache_file = tmp_path / "cache.json"
-    cache_file.write_text(json.dumps({"T1": {"status": "ok"}, "BAD1": {"status": "fehler"}}),
-                          encoding="utf-8")
-    load, calls = _fake_load({"T1"}, {"BAD1"})
+    load, calls = _fake_load(set(), {"BAD1"})
     monkeypatch.setattr(run_ranking, "load_with_provider", load)
     monkeypatch.setattr(run_ranking.time, "sleep", lambda s: None)
+    cache_file = tmp_path / "cache.json"
+    t1 = TickerMetrics(ticker="T1")
+    t1.name = "T1"
+    bad1_err = {"status": "fehler", "error": "boom BAD1 (alt)"}
+    cache_file.write_text(json.dumps({"version": run_ranking.CACHE_VERSION,
+                                       "entries": {"T1": {"status": "ok", "data": t1.to_dict()},
+                                                   "BAD1": bad1_err}}),
+                          encoding="utf-8")
     args = run_ranking._parse_args(["--tickers", "x.csv", "--cache", str(cache_file)])
     companies, errors = run_ranking._run_batched(["T1", "T2", "BAD1"], cfg, {}, args)
-    # T1 ist im Cache ok -> nicht erneut geladen; BAD1 (fehler) wird wiederholt
+    # T1 aus dem Cache (kein erneuter Abruf); T2 + BAD1 (fehler) werden geladen
     assert calls == ["T2", "BAD1"]
-    assert {c.ticker for c in companies} == {"T2"}
-    assert [e["ticker"] for e in errors] == ["BAD1"]
+    assert [c.ticker for c in companies] == ["T1", "T2"]
+    assert {e["ticker"] for e in errors} == {"BAD1"}
+    assert "boom BAD1" in errors[0]["error"]
 
 
 def test_write_ranking_csv(tmp_path, cfg):
