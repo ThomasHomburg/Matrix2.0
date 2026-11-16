@@ -71,33 +71,113 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def _load_cache(path: Path) -> dict:
-    if path.exists():
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-    return {}
+CACHE_VERSION = 2  # v64: 2 = Eintraege mit vollstaendigem TickerMetrics-Datenblock
+
+
+def _load_cache(path: Path) -> tuple[dict, int]:
+    """Laedt den Resume-Cache; Rueckgabe (entries, version).
+
+    v64: Cache-Format {"version": 2, "entries": {ticker: {...}}} mit voll-
+    staendigem Datenblock je erfolgreichem Ticker. Altes Flachformat ohne
+    "version" wird als Version 1 gelesen (nur Status, keine Daten -> Ticker
+    werden neu geladen). Unbekannte Versionen/beschaedigte Dateien -> leerer
+    Cache, alle Ticker werden geladen; ein ungueltiger Cache stoppt den Lauf
+    nie, er wird nur protokolliert.
+    """
+    if not path.exists():
+        return {}, CACHE_VERSION
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Resume-Cache %s unlesbar (%s) -- wird ignoriert, alle Ticker neu laden",
+                       path.name, exc)
+        return {}, CACHE_VERSION
+    if not isinstance(raw, dict):
+        logger.warning("Resume-Cache %s hat ungueltiges Format -- wird ignoriert", path.name)
+        return {}, CACHE_VERSION
+    version = raw.get("version")
+    if version == CACHE_VERSION:
+        entries = raw.get("entries")
+        if isinstance(entries, dict):
+            return entries, version
+        logger.warning("Resume-Cache %s: entries-Block fehlt -- wird ignoriert", path.name)
+        return {}, version
+    if "version" not in raw:
+        logger.warning("Resume-Cache %s ohne Schema-Version (altes Format, nur Status) -- "
+                       "erfolgreiche Ticker enthalten keine Daten und werden neu geladen",
+                       path.name)
+        return raw, 1
+    logger.warning("Resume-Cache %s mit unbekannter Schema-Version %s -- wird ignoriert",
+                   path.name, version)
+    return {}, version if isinstance(version, int) else 0
 
 
 def _save_cache(path: Path, cache: dict) -> None:
-    path.write_text(json.dumps(cache, ensure_ascii=False, indent=1), encoding="utf-8")
+    """Schreibt den Cache atomar: erst temporare Datei, dann os.replace.
+
+    Ein Abbruch waehrend des Schreibens zerstoert keinen zuvor gueltigen Cache.
+    """
+    payload = json.dumps({"version": CACHE_VERSION, "entries": cache},
+                         ensure_ascii=False, indent=1)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        raise
 
 
 def _run_batched(tickers: list[str], cfg: dict, providers: dict, args) -> tuple[list, list]:
-    """v32 Volllauf: Batches mit Pause, Fortschritt, Wiederaufnahme (Cache mit
-    fertigen Rows), Fehlerlog je Ticker. Rueckgabe: (companies, errors)."""
+    """v32 Volllauf: Batches mit Pause, Fortschritt, Wiederaufnahme, Fehlerlog
+    je Ticker. Rueckgabe: (companies, errors).
+
+    v64 Resume: erfolgreiche Ticker werden mit vollem TickerMetrics-
+    Datenblock im Cache persistiert und beim naechsten Lauf daraus
+    rekonstruiert (kein erneuter Provider-Abruf). Alte Eintraege ohne
+    Datenblock, ungueltige Datenbloecke sowie Ticker mit Status "fehler"
+    werden neu geladen; gespeicherte Fehler bleiben im errors-Rueckgabewert
+    erhalten (ausser der Ticker gelingt im aktuellen Lauf). Die Reihenfolge
+    der companies entspricht immer der Eingabe-Ticker-Liste.
+    """
     ucfg = cfg.get("universe", {})
     batch_size = max(1, args.batch or int(ucfg.get("batch_size", 20)))
     pause = args.pause if args.pause > 0 else float(ucfg.get("batch_pause_seconds", 2.0))
     cache_file = Path(args.cache or ".ranking_cache.json")
-    cache = {} if args.no_resume else _load_cache(cache_file)
-    errors: list[dict] = []
-    companies: list[TickerMetrics] = []
-    # Resume: Ticker mit cache[status]=="fehler" erneut versuchen, "ok" ueberspringen
-    todo = [t for t in tickers if cache.get(t, {}).get("status") != "ok"]
-    logger.info("Volllauf: %d Ticker gesamt, %d noch zu laden (Cache: %s), Batch=%d, Pause=%.1fs",
-                len(tickers), len(todo), cache_file.name, batch_size, pause)
+    cache: dict = {}
+    if args.no_resume:
+        cache_version = CACHE_VERSION
+    else:
+        cache, cache_version = _load_cache(cache_file)
+    # Wiederherstellung: Cache-Eintraege mit Status ok + gueltigem Datenblock
+    restored: dict[str, TickerMetrics] = {}
+    for t in tickers:
+        entry = cache.get(t)
+        if isinstance(entry, dict) and entry.get("status") == "ok":
+            data = entry.get("data")
+            try:
+                if not isinstance(data, dict):
+                    raise ValueError("Datenblock fehlt (altes Cache-Format)")
+                restored[t] = TickerMetrics.from_dict(data)
+            except Exception as exc:
+                logger.warning("Cache-Eintrag %s ungueltig (%s) -- Ticker wird neu geladen",
+                               t, exc)
+    # Gespeicherte Fehler uebernehmen (verschwinden, wenn der Retry gelingt)
+    errors_by_ticker: dict[str, dict] = {}
+    for t in tickers:
+        entry = cache.get(t)
+        if isinstance(entry, dict) and entry.get("status") == "fehler":
+            errors_by_ticker[t] = {"ticker": t, "error": str(entry.get("error") or "")[:200]}
+    loaded: dict[str, TickerMetrics] = {}
+    todo = [t for t in tickers if t not in restored]
+    logger.info("Volllauf: %d Ticker gesamt, %d noch zu laden, %d aus Cache wiederhergestellt "
+                "(Cache: %s, Version %s), Batch=%d, Pause=%.1fs",
+                len(tickers), len(todo), len(restored), cache_file.name,
+                cache_version, batch_size, pause)
     for start in range(0, len(todo), batch_size):
         batch = todo[start:start + batch_size]
         logger.info("Batch %d-%d von %d (%d/%d erledigt)",
@@ -106,18 +186,23 @@ def _run_batched(tickers: list[str], cfg: dict, providers: dict, args) -> tuple[
         for ticker in batch:
             try:
                 m = load_with_provider(ticker, cfg, providers, years=cfg["data"]["years"])
-                companies.append(m)
-                cache[ticker] = {"status": "ok"}
+                loaded[ticker] = m
+                cache[ticker] = {"status": "ok", "data": m.to_dict()}
+                errors_by_ticker.pop(ticker, None)
             except Exception as exc:  # ProviderError + alles andere: Lauf stoppt nicht
                 logger.error("Fehler bei %s: %s", ticker, exc)
-                errors.append({"ticker": ticker, "error": str(exc)[:200]})
+                errors_by_ticker[ticker] = {"ticker": ticker, "error": str(exc)[:200]}
                 cache[ticker] = {"status": "fehler", "error": str(exc)[:200]}
         _save_cache(cache_file, cache)
         if start + batch_size < len(todo):
             time.sleep(pause)
+    errors = [errors_by_ticker[t] for t in tickers if t in errors_by_ticker]
     if errors:
         logger.warning("Fehlerlog (%d): %s", len(errors),
                        ", ".join(e["ticker"] for e in errors))
+    by_ticker = dict(restored)
+    by_ticker.update(loaded)
+    companies = [by_ticker[t] for t in tickers if t in by_ticker]
     return companies, errors
 
 
