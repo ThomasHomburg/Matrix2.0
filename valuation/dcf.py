@@ -284,7 +284,8 @@ def _net_debt_ex_customer_deposits(m: TickerMetrics, fcf_basis: str,
         td_m = ttm.ttm.get("_total_debt")
         cash_m = ttm.ttm.get("_cash")
         sti_m = ttm.ttm.get("_short_term_investments")
-        if nd_m is not None or td_m is not None or cash_m is not None:
+        if (nd_m is not None or td_m is not None or cash_m is not None
+                or sti_m is not None):
             saw_balance = True
         cd = cd_m.value if (cd_m is not None and not cd_m.is_na()) else nan
         cur = (nd_m.currency if nd_m is not None and not nd_m.is_na()
@@ -321,7 +322,7 @@ def _net_debt_ex_customer_deposits(m: TickerMetrics, fcf_basis: str,
         td = y.get("_total_debt")
         cash = y.get("_cash")
         sti = y.get("_short_term_investments")
-        if nd is not None or td is not None or cash is not None:
+        if nd is not None or td is not None or cash is not None or sti is not None:
             saw_balance = True
         cd_v = cd.value if (cd is not None and not cd.is_na()) else nan
         if (net_debt_mode == "incl_sti" and td is not None and not td.is_na()

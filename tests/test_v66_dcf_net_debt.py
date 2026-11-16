@@ -360,3 +360,24 @@ def test_incl_sti_ttm_known_zero_cash():
                        INCL_STI_CFG, fcf_mode="ttm_only")
     assert res.net_debt == pytest.approx(400.0)
     assert res.net_debt_known is True
+
+
+def test_incl_sti_ttm_known_zero_sti():
+    """TTM: bekannte kurzfr. Anlagen = 0 sind zulaessig:
+    500 - (200 + 0) = 300, Status bekannt."""
+    res = compute_dcf(_ticker_ttm(total_debt=500.0, cash=200.0, sti=0.0),
+                      INCL_STI_CFG, fcf_mode="ttm_only")
+    assert res.net_debt == pytest.approx(300.0)
+    assert res.net_debt_known is True
+    assert res.net_debt_status == "bekannt_positiv"
+    assert "kurzfr. Anlagen" in res.net_debt_source
+
+
+def test_sti_only_marks_balance_incomplete():
+    """Nur kurzfr. Anlagen vorhanden (kein TD/Cash/ND) -> Status
+    unvollstaendig statt fehlend (Bilanzdaten existieren, sind aber nicht
+    kombinierbar)."""
+    res = compute_dcf(_ticker(sti=100.0), DCF_CFG)
+    assert math.isnan(res.net_debt)
+    assert res.net_debt_known is False
+    assert res.net_debt_status == "unvollstaendig"
