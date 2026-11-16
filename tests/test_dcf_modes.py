@@ -103,13 +103,20 @@ def test_dcf_negative_net_debt_increases_value():
     assert base.value_per_share == pytest.approx((1569.00 + 300.0) / 10.0, abs=1e-2)
 
 
-def test_dcf_without_net_debt_keeps_ev_behaviour():
-    """Ohne Bilanzdaten: Wert je Aktie = EV / Aktien (rueckwaertskompatibel)."""
+def test_dcf_without_net_debt_is_not_bearable():
+    """v66: Unbekannte Nettoverschuldung (keine Bilanzdaten) -> DCF nicht
+    belastbar. Wert je Aktie/MoS = NaN, NIEMALS EV-Naeherung (unbekannt != 0);
+    kein Kaufkandidat trotz hoher Quality."""
     res = compute_dcf(_ticker(), DCF_CFG)
-    base = res.scenarios["base"]
     assert math.isnan(res.net_debt)
     assert res.net_debt_source == "n/a"
-    assert base.value_per_share == pytest.approx(156.90, abs=1e-2)
+    assert res.net_debt_known is False
+    assert res.net_debt_status == "unbekannt"
+    for name in ("bear", "base", "bull"):
+        assert math.isnan(res.scenarios[name].value_per_share)
+    assert math.isnan(res.margin_of_safety)
+    assert math.isnan(res.mos_base_alt)
+    assert not is_buy_candidate(75.0, res, 100.0, DCF_CFG)
 
 
 def test_dcf_net_debt_from_ttm_when_basis_ttm():
@@ -221,7 +228,7 @@ def test_fcf_mode_invalid_falls_back_to_auto():
 
 def test_modes_give_different_mos():
     """MoS (Base) unterscheidet sich je Startwert-Modus."""
-    m = _ticker({2023: 80.0, 2024: 100.0, 2025: 200.0})
+    m = _ticker({2023: 80.0, 2024: 100.0, 2025: 200.0}, net_debt=0.0)
     mos_avg3 = compute_dcf(m, DCF_CFG, fcf_mode="avg3").margin_of_safety
     mos_latest = compute_dcf(m, DCF_CFG, fcf_mode="latest").margin_of_safety
     assert mos_avg3 != pytest.approx(mos_latest)
@@ -257,10 +264,10 @@ def test_is_buy_candidate_with_net_debt():
     assert res.margin_of_safety == pytest.approx(1 - 100.0 / 136.90, abs=1e-3)
     assert not is_buy_candidate(75.0, res, price, DCF_CFG)   # MoS < 30 %
     assert not is_buy_candidate(59.0, res, price, DCF_CFG)   # Quality < 60
-    # Ohne ND: MoS 36,3 % >= 30 %, Bear >= 80 % Kurs -> Kandidat
-    res_ohne_nd = compute_dcf(_ticker(), DCF_CFG)
-    assert is_buy_candidate(75.0, res_ohne_nd, price, DCF_CFG) is True
+    # Bei bekannter ND von exakt 0: MoS 36,3 % >= 30 %, Bear >= 80 % Kurs -> Kandidat
+    res_nd0 = compute_dcf(_ticker(net_debt=0.0), DCF_CFG)
+    assert is_buy_candidate(75.0, res_nd0, price, DCF_CFG) is True
     # Net Cash erhoeht den Wert -> Kandidat trotz hoeherem Kurs
     res_net_cash = compute_dcf(_ticker(net_debt=-300.0), DCF_CFG)
-    assert res_net_cash.margin_of_safety > res_ohne_nd.margin_of_safety
+    assert res_net_cash.margin_of_safety > res_nd0.margin_of_safety
     assert is_buy_candidate(75.0, res_net_cash, price, DCF_CFG) is True

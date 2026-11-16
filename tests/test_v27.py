@@ -40,6 +40,7 @@ def _ticker_with_ttm(fcf_fy: float = 100.0, fcf_q: float = 30.0,
             "fcf_sbc": Metric("fcf_sbc", fcf_fy, "USD", "USD", fy),
             "revenue": Metric("revenue", rev, "USD", "USD", fy),
             "shares_diluted": Metric("shares_diluted", shares, "shares", "USD", fy),
+            "net_debt": Metric("net_debt", 0.0, "USD", "USD", fy),  # bekannt 0 (v66)
         }
     quarters = [pd.Timestamp("2026-08-31"), pd.Timestamp("2026-05-31"),
                 pd.Timestamp("2026-02-28"), pd.Timestamp("2025-11-30")]

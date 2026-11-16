@@ -33,7 +33,11 @@ DCF_CFG = {"dcf": {
 
 def _ticker(fcf_sbc: float = 100.0, mcap: float = 1000.0, shares: float = 10.0,
             cagr: float = 0.05) -> TickerMetrics:
-    """Synthetischer Ticker: 3 Jahre FCF-SBC, Umsatz mit konstantem CAGR."""
+    """Synthetischer Ticker: 3 Jahre FCF-SBC, Umsatz mit konstantem CAGR.
+
+    Bekannte Nettoverschuldung von exakt 0 (schuldensfreies Unternehmen) --
+    kein unbekanntes NaN, damit der DCF belastbar ist (v66).
+    """
     m = TickerMetrics(ticker="TEST")
     m.market_cap = Metric("market_cap", mcap, "USD", "USD", 2025)
     for i, fy in enumerate((2023, 2024, 2025)):
@@ -41,6 +45,7 @@ def _ticker(fcf_sbc: float = 100.0, mcap: float = 1000.0, shares: float = 10.0,
             "fcf_sbc": Metric("fcf_sbc", fcf_sbc, "USD", "USD", fy),
             "revenue": Metric("revenue", 1000.0 * (1 + cagr) ** i, "USD", "USD", fy),
             "shares_diluted": Metric("shares_diluted", shares, "shares", "USD", fy),
+            "net_debt": Metric("net_debt", 0.0, "USD", "USD", fy),
         }
     return m
 
