@@ -112,7 +112,29 @@ class YfinanceProvider:
         if financials is None or financials.empty:
             raise ProviderError(f"yfinance: keine Daten fuer {ticker}")
 
-        currency = (info.get("currency") or info.get("financialCurrency") or "USD").upper()
+        # v68 (Audit F1): Handels- und Berichtswaehrung trennen.
+        # - trading_cur (info['currency']): Quote-Waehrung von Boersenkurs
+        #   und Marktkapitalisierung.
+        # - report_cur (info['financialCurrency']): Waehrung der Statements
+        #   (financials/balance_sheet/cashflow und quarterly_*) -- yfinance
+        #   liefert ALLE Statements in der Berichtswaehrung (belegt u. a.
+        #   an BABA USD/CNY, SHEL.L GBp/USD, PFE.DE EUR/USD, TM USD/JPY).
+        # Fehlt financialCurrency, ist die Statement-Waehrung NICHT
+        # bestimmbar (die Statements-DataFrames von yfinance tragen keine
+        # Waehrungsangabe). Es wird KEINE Waehrung unterstellt -- auch nicht
+        # die Handelswaehrung (nicht beweisbar): report_cur bleibt "" und
+        # nachgelagerte FX-Pruefungen scheiden solche Werte sicher aus
+        # (NaN, nie still falsch). Empirie (v68-Pruefung): war
+        # financialCurrency fehlend, waren auch die Statements nicht
+        # verfuegbar -- der Fall ist in der Praxis selten; Kosten der
+        # sicheren Variante daher gering.
+        trading_cur = str(info.get("currency") or "").upper().strip()
+        report_cur = str(info.get("financialCurrency") or "").upper().strip()
+        if not report_cur:
+            logger.warning("%s: financialCurrency fehlt -- Statement-Waehrung "
+                           "unbekannt, keine Zuordnung zur Handelswaehrung %s; "
+                           "Kennzahlen scheiden als NaN aus", ticker,
+                           trading_cur or "(unbekannt)")
         mcap = info.get("marketCap")
 
         result = TickerMetrics(ticker=ticker.upper())
@@ -139,7 +161,7 @@ class YfinanceProvider:
             result.extras["dividend_yield"] = Metric("dividend_yield", dy_val, "ratio", "", 0)
         if mcap is not None:
             # marketCap in Quote-Waehrung, absolut (wie FMP mktCap)
-            result.market_cap = Metric("market_cap", float(mcap), currency, currency,
+            result.market_cap = Metric("market_cap", float(mcap), trading_cur, trading_cur,
                                        int(financials.columns[0].year))
             from datetime import date
             result.market_cap_date = date.today().isoformat()  # Stichtag: Abrufdatum
@@ -147,7 +169,7 @@ class YfinanceProvider:
         pr = info.get("regularMarketPrice") or info.get("currentPrice")
         if pr is not None:
             from datetime import date
-            result.price = Metric("price", float(pr), currency, currency,
+            result.price = Metric("price", float(pr), trading_cur, trading_cur,
                                   int(financials.columns[0].year))
             result.price_date = date.today().isoformat()
         # naechster Earnings-Termin, falls im info-Feld vorhanden
@@ -184,18 +206,18 @@ class YfinanceProvider:
                             "shares_diluted"):
                     year_metrics[key] = Metric(key, _pick(financials, _ROW_MAP[key], inc_col),
                                                "currency" if key != "shares_diluted" else "shares",
-                                               currency, fy)
+                                               report_cur, fy)
             if bal_col is not None:
                 for key in ("equity", "_total_debt", "net_debt", "_cash", "_short_term_investments",
                             "_restricted_cash", "customer_deposits",
                             "_long_term_debt", "_short_term_debt"):  # Debt-Fallbacks
                     year_metrics[key] = Metric(key, _pick(balance, _ROW_MAP[key], bal_col),
-                                               "currency", currency, fy)
+                                               "currency", report_cur, fy)
             if cf_col is not None:
                 for key in ("operating_cashflow", "capex", "stock_based_compensation", "_fcf_reported",
                             "depreciation_amortization"):
                     year_metrics[key] = Metric(key, _pick(cashflow, _ROW_MAP[key], cf_col),
-                                               "currency", currency, fy)
+                                               "currency", report_cur, fy)
 
             # EBITDA = EBIT + D&A aus dem Cashflow-Statement (nicht das
             # Yahoo-EBITDA-Feld); Fallback: gemeldetes EBITDA wenn D&A fehlt.
@@ -204,7 +226,7 @@ class YfinanceProvider:
             if (ebit_m is not None and da_m is not None
                     and not math.isnan(ebit_m.value) and not math.isnan(da_m.value)):
                 year_metrics["ebitda"] = Metric("ebitda", ebit_m.value + da_m.value,
-                                                "currency", currency, fy)
+                                                "currency", report_cur, fy)
             eb_m = year_metrics.get("ebitda")
             if (eb_m is not None and ebit_m is not None and not eb_m.is_na()
                     and not math.isnan(ebit_m.value) and eb_m.value < ebit_m.value):
@@ -232,13 +254,13 @@ class YfinanceProvider:
                 fcf_val = ocf.value + capex.value  # Capex bei yfinance negativ
             else:
                 fcf_val = _nan()
-            year_metrics["fcf"] = Metric("fcf", fcf_val, currency, currency, fy)
+            year_metrics["fcf"] = Metric("fcf", fcf_val, report_cur, report_cur, fy)
 
             # FCF nach SBC = FCF - Aktienverguetung; fehlende SBC -> NaN, nie 0
             sbc = year_metrics.get("stock_based_compensation")
             sbc_val = sbc.value if sbc is not None else _nan()
             fcf_sbc = fcf_val - sbc_val if not (math.isnan(fcf_val) or math.isnan(sbc_val)) else _nan()
-            year_metrics["fcf_sbc"] = Metric("fcf_sbc", fcf_sbc, currency, currency, fy)
+            year_metrics["fcf_sbc"] = Metric("fcf_sbc", fcf_sbc, report_cur, report_cur, fy)
 
             # Interest Expense: yfinance berichtet teils negativ -> Betrag
             ie = year_metrics.get("interest_expense")
@@ -247,11 +269,15 @@ class YfinanceProvider:
 
             result.years[fy] = year_metrics
 
-        logger.info("%s: %d Jahre von yfinance geladen (Waehrung %s)", ticker, len(result.years), currency)
+        logger.info("%s: %d Jahre von yfinance geladen "
+                    "(Berichtswaehrung %s, Handelswaehrung %s)",
+                    ticker, len(result.years), report_cur or "unbekannt",
+                    trading_cur or "unbekannt")
 
         # --- TTM aus Quartalsdaten (Flussgroessen Summe letzte 4 Quartale,
-        # Bestandsgoessen Stichtag letztes Quartal) ---
-        ttm = self._load_ttm(tk, result, currency, fy_hint=int(financials.columns[0].year))
+        # Bestandsgoessen Stichtag letztes Quartal); Quartals-Statements
+        # ebenfalls in der Berichtswaehrung ---
+        ttm = self._load_ttm(tk, result, report_cur, fy_hint=int(financials.columns[0].year))
         if ttm is not None:
             result.ttm = ttm
             result.ttm_plausible = ttm.plausible
@@ -276,6 +302,8 @@ class YfinanceProvider:
             return None
         from data.ttm import compute_ttm
         # result traegt bereits die Jahresdaten -> Vergleich TTM vs. Jahreswert
+        # currency = Berichtswaehrung der Quartals-Statements (v68/F1)
         return compute_ttm(result, {
             "income": q_inc, "balance": q_bal, "cashflow": q_cf, "row_map": _ROW_MAP,
+            "currency": currency,
         })

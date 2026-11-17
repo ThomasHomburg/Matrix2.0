@@ -187,8 +187,11 @@ CF_ROWS = {
     "Stock Based Compensation": [3e9, 2e9],
 }
 COLS = [pd.Timestamp("2025-12-31"), pd.Timestamp("2024-12-31")]
-INFO = {"currency": "EUR", "marketCap": 200e9, "longName": "Test AG",
-        "sector": "Industrials", "country": "Germany"}
+# v68: financialCurrency explizit -- die Statement-Waehrung wird nicht mehr
+# aus der Handelswaehrung unterstellt (F1); das Fixture modelliert ein
+# Unternehmen mit EUR-Statements und EUR-Quote.
+INFO = {"currency": "EUR", "financialCurrency": "EUR", "marketCap": 200e9,
+        "longName": "Test AG", "sector": "Industrials", "country": "Germany"}
 
 
 def _load_yf(years=5, info=INFO, fin_rows=FIN_ROWS, bal_rows=BAL_ROWS, cf_rows=CF_ROWS, cols=COLS):
