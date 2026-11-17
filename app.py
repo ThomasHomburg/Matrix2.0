@@ -1004,9 +1004,14 @@ def dcf_section(m: TickerMetrics, row: dict | None) -> None:
         nd_alt_s = f"{nd_alt_val / 1e9:,.2f} Mrd. {cur}"
         if dcf.net_debt_alt_source:
             nd_alt_s += f" · {dcf.net_debt_alt_source}"
-    price = None
-    if m.market_cap is not None and not m.market_cap.is_na() and dcf.shares == dcf.shares:
-        price = m.market_cap.value / dcf.shares
+    # v67: DCF-Vergleichskurs passend zur konfigurierten Aktienbasis
+    # (current -> Boersenkurs wie compute_dcf; fy_diluted -> Marktkap./Aktien;
+    # ohne passenden Kurs n/a -- kein FY-Rueckfall).
+    from valuation.dcf import dcf_comparison_price
+    _p = dcf_comparison_price(
+        dcf, m.market_cap.value if (m.market_cap is not None
+                                    and not m.market_cap.is_na()) else float("nan"))
+    price = _p if _p == _p else None
     sum_rows = []
     for name in ("bear", "base", "bull"):
         sc = dcf.scenarios.get(name)
@@ -1101,7 +1106,15 @@ def dcf_section(m: TickerMetrics, row: dict | None) -> None:
 
     # --- Sensitivitaetstabelle: MoS (Base) ueber Diskontsatz x Terminal Growth ---
     st.markdown("**Sensitivität: MoS (Base) je Aktie**")
-    sens = sensitivity_mos_base(m, CFG, current_price=price)
+    # v67: Sensitivitaet nur mit passendem Vergleichskurs. Ohne Kurs (bei
+    # share_basis=current ohne kurs_boerse) wuerde die Funktion intern auf
+    # den FY-basierten Default-Kurs zurueckfallen -- stattdessen n/a.
+    if price is not None:
+        sens = sensitivity_mos_base(m, CFG, current_price=price)
+    else:
+        sens = {"mos": pd.DataFrame(), "vps": pd.DataFrame()}
+        st.info("Sensitivitaet n/a -- kein zur Aktienbasis passender "
+                "Vergleichskurs (kein Rueckfall auf die Marktkap.-Basis).")
     if sens and not sens["mos"].empty:
         mos_df = sens["mos"].copy()
         vps_df = sens["vps"].copy()
