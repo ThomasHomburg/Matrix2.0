@@ -129,6 +129,9 @@ def test_ttm_only_unterscheidet_sich_von_ttm_und_avg3():
 def _mk_watch(fcf_by_fy: dict, mcap: float, shares: float = 2e9) -> TickerMetrics:
     m = TickerMetrics(ticker="WATCH", country="US")
     m.market_cap = Metric("market_cap", mcap, "USD", "USD", 2025)
+    # v67: Boersenkurs == Marktkap./Aktien (konsistent; ohne kurs wuerde bei
+    # share_basis=current keine Kaufentscheidung getroffen)
+    m.price = Metric("price", mcap / shares, "USD", "USD", 2025)
     m.name = "Watch Corp"
     m.sector = "Technology"
     rev = 100e9

@@ -17,7 +17,7 @@ from scoring.criteria import compute_criteria, active_criteria
 from scoring.sectors import sector_rule, normalized_net_income, price_to_book, dividend_yield
 from scoring.filters import check_filters, count_value_years
 from scoring.score import score_ticker
-from valuation.dcf import compute_dcf, is_buy_candidate
+from valuation.dcf import compute_dcf, dcf_comparison_price, is_buy_candidate
 
 logger = logging.getLogger("value_screener.pipeline")
 
@@ -117,6 +117,13 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict) -> dict:
     if (m.market_cap is not None and not m.market_cap.is_na()
             and dcf.shares == dcf.shares and dcf.shares > 0):
         price = m.market_cap.value / dcf.shares
+    # v67: Kurs fuer DCF-Vergleiche (Bear-Floor, mos_bear/mos_bull,
+    # Bear-Begruendung, Sanity-Flags) -- passend zur konfigurierten
+    # Aktienbasis; bei share_basis=current ohne Boersenkurs NaN
+    # (KEINE Kaufentscheidung auf Basis des unpassenden FY-Kurses).
+    dcf_price = dcf_comparison_price(
+        dcf, m.market_cap.value if (m.market_cap is not None
+                                    and not m.market_cap.is_na()) else float("nan"))
 
     dc = cfg["dcf"]  # vor mos_by_mode/mos_robust benoetigt
     # MoS (Base) je Startwert-Modus (Ø3J / jüngstes GJ / TTM Ø / TTM rein)
@@ -170,7 +177,7 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict) -> dict:
         mos_rule = mos_by_mode.get(mos_mode, float("nan"))
 
     # Kandidatenregel auf Quality (statt Gesamtscore) umgestellt
-    dcf.is_buy = is_buy_candidate(result["quality"], dcf, price, cfg, mos_rule=mos_rule)
+    dcf.is_buy = is_buy_candidate(result["quality"], dcf, dcf_price, cfg, mos_rule=mos_rule)
 
     # MoS je Szenario + Kandidaten-Begruendung (welche Bedingung fehlt)
     quality_min = float(dc.get("buy_quality_min", 60))
@@ -181,13 +188,13 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict) -> dict:
     mos_bull = float("nan")
     bear_vps = dcf.scenarios.get("bear")
     bull_vps = dcf.scenarios.get("bull")
-    if price == price and price > 0:
+    if dcf_price == dcf_price and dcf_price > 0:
         if bear_vps is not None and bear_vps.value_per_share == bear_vps.value_per_share \
                 and bear_vps.value_per_share > 0:
-            mos_bear = 1.0 - price / bear_vps.value_per_share
+            mos_bear = 1.0 - dcf_price / bear_vps.value_per_share
         if bull_vps is not None and bull_vps.value_per_share == bull_vps.value_per_share \
                 and bull_vps.value_per_share > 0:
-            mos_bull = 1.0 - price / bull_vps.value_per_share
+            mos_bull = 1.0 - dcf_price / bull_vps.value_per_share
     missing = []
     if result["quality"] != result["quality"] or result["quality"] < quality_min:
         missing.append(f"Quality {result['quality']:.1f} < {quality_min:.0f}"
@@ -215,10 +222,14 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict) -> dict:
                 missing.append(f"Start-FCF ≤ 0 im Modus {', '.join(le0_modes)}")
             else:
                 missing.append("MoS Base n/a")
-    if (bear_vps is None or bear_vps.value_per_share != bear_vps.value_per_share
-            or bear_vps.value_per_share < bear_floor * (price if price == price else float("nan"))):
-        if price == price and bear_vps is not None and bear_vps.value_per_share == bear_vps.value_per_share:
-            missing.append(f"Bear {bear_vps.value_per_share / price:.0%} Kurs < {bear_floor:.0%} Kurs")
+    bear_ok = (bear_vps is not None
+               and bear_vps.value_per_share == bear_vps.value_per_share
+               and dcf_price == dcf_price
+               and bear_vps.value_per_share >= bear_floor * dcf_price)
+    if not bear_ok:
+        if (dcf_price == dcf_price and bear_vps is not None
+                and bear_vps.value_per_share == bear_vps.value_per_share):
+            missing.append(f"Bear {bear_vps.value_per_share / dcf_price:.0%} Kurs < {bear_floor:.0%} Kurs")
         else:
             missing.append("Bear n/a")
 
@@ -299,14 +310,14 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict) -> dict:
         # aktive Regel = juengste 2
         status, status_detail = _status_for(
             mos_recent2, recent2,
-            is_buy_candidate(result["quality"], dcf, price, cfg, mos_rule=mos_recent2))
+            is_buy_candidate(result["quality"], dcf, dcf_price, cfg, mos_rule=mos_recent2))
         status_all, status_all_detail = _status_for(mos_rule, mos_vals, dcf.is_buy)
         status_recent2, status_recent2_detail = status, status_detail
     else:
         # Default min_all: aktive Regel = alle Modi
         status_all, status_all_detail = status, status_detail
         is_buy_recent2 = (False if sbc_missing_all else
-                          is_buy_candidate(result["quality"], dcf, price, cfg, mos_rule=mos_recent2))
+                          is_buy_candidate(result["quality"], dcf, dcf_price, cfg, mos_rule=mos_recent2))
         status_recent2, status_recent2_detail = _status_for(mos_recent2, recent2, is_buy_recent2)
     # Quelle pro Ticker loggen (CLAUDE.md: Logging-Pflicht)
     logger.info("%s: Quelle=%s (%s)", m.ticker, m.source or "unbekannt", m.name)
@@ -508,7 +519,10 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict) -> dict:
     mos_v = dcf.margin_of_safety
     iv_base_v = (dcf.scenarios["base"].value_per_share
                  if dcf.scenarios.get("base") else float("nan"))
-    for f in sanity_mos_flags(mos_v, iv_base_v, price, cfg):
+    # v67: 'wert:nahe_null' vergleicht den DCF-Wert je Aktie (aktueller
+    # Aktienbasis) mit dem Kurs -- daher dcf_price (passende Basis), nicht
+    # der FY-Screener-Kurs. 'mos:extrem' ist basisinvariant (nur MoS).
+    for f in sanity_mos_flags(mos_v, iv_base_v, dcf_price, cfg):
         flag_parts.append(f)
         logger.warning("%s: %s (MoS=%.6g, iv_base=%.6g, kurs=%.6g)", m.ticker, f, mos_v, iv_base_v, price)
 

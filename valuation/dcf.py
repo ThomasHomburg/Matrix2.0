@@ -528,11 +528,52 @@ def compute_dcf(m: TickerMetrics, cfg: dict, fx=None, fcf_mode: str | None = Non
     if nd_alt_conv == nd_alt_conv and base is not None and not result.fcf_le0:
         ev = base.enterprise_value
         equity_alt = ev - nd_alt_conv if ev == ev else nan
-        vps_alt = equity_alt / result.shares if (equity_alt == equity_alt
-                                                 and result.shares == result.shares) else nan
+        # v67: effektive Aktienbasis wie die Hauptberechnung (shares_current;
+        # bei fy_diluted identisch mit shares) -- sonst wuerde bei
+        # share_basis=current der Wert je Aktie auf FY-Aktien, der Kurs aber
+        # auf den Boersenkurs gerechnet (Mischbasis).
+        vps_alt = equity_alt / result.shares_current if (equity_alt == equity_alt
+                                                         and result.shares_current == result.shares_current) else nan
         if vps_alt == vps_alt and vps_alt > 0 and price == price and price > 0:
             result.mos_base_alt = 1.0 - price / vps_alt
     return result
+
+
+def _merge_grid_points(defaults, configured: float) -> list[float]:
+    """v67: Stuetzstellen + konfigurierter Wert, toleranzbasiert dedupliziert.
+
+    set() ist fuer Floats unzuverlaessig: rechnerisch identische Werte koennen
+    intern minimal abweichen (z. B. 0.09 vs. 0.09000000000000001) und wuerden
+    als doppelte Stuetzstelle im Grid auftauchen. Deduplizierung mit
+    Toleranz 1e-9 (Raten liegen in [0, 1]); die fachliche Genauigkeit der
+    DCF-Berechnung bleibt unveraendert -- es wird nichts gerundet, nur die
+    Grid-Auswahl bereinigt.
+    """
+    out: list[float] = []
+    for v in sorted(float(x) for x in list(defaults) + [float(configured)]):
+        if not any(abs(v - u) <= 1e-9 for u in out):
+            out.append(v)
+    return out
+
+
+def dcf_comparison_price(dcf: DcfResult, mcap_value: float) -> float:
+    """v67: DCF-Vergleichskurs passend zur konfigurierten Aktienbasis.
+
+    share_basis=current -> Boersenkurs (wie compute_dcf); fehlt der
+    Boersenkurs, bleibt der Kurs NaN (KEIN Rueckfall auf den FY-Kurs,
+    damit keine Entscheidung auf unpassender Basis getroffen wird).
+    share_basis=fy_diluted -> Marktkapitalisierung / FY-Aktien (bisheriges
+    Verhalten). Rueckgabe NaN, wenn keine Basis verfuegbar ist.
+    """
+    nan = float("nan")
+    if dcf.price_basis == "current":
+        if dcf.kurs_boerse == dcf.kurs_boerse and dcf.kurs_boerse > 0:
+            return dcf.kurs_boerse
+        return nan
+    if (dcf.shares == dcf.shares and dcf.shares > 0
+            and mcap_value == mcap_value and mcap_value > 0):
+        return mcap_value / dcf.shares
+    return nan
 
 
 def sensitivity_mos_base(m: TickerMetrics, cfg: dict, current_price: float | None = None,
@@ -562,14 +603,22 @@ def sensitivity_mos_base(m: TickerMetrics, cfg: dict, current_price: float | Non
     mcap = m.market_cap
     if mcap is None or mcap.is_na() or mcap.value <= 0:
         return {"mos": pd.DataFrame(), "vps": pd.DataFrame()}
-    if base_res.shares != base_res.shares or base_res.shares <= 0:
+    # v67: effektive Aktienbasis wie die Hauptberechnung (shares_current;
+    # bei fy_diluted identisch mit shares). Fehlende FY-Aktien sind bei
+    # share_basis=current kein Abbruchgrund, wenn aktien_aktuell existiert.
+    if (base_res.shares_current != base_res.shares_current
+            or base_res.shares_current <= 0):
         return {"mos": pd.DataFrame(), "vps": pd.DataFrame()}
 
     # Kurs: Parameter, sonst aus Marktkap./Aktien (wie compute_dcf)
     if current_price is not None and current_price == current_price and current_price > 0:
         price = float(current_price)
+    elif (str(dcfg.get("share_basis", "current")).lower() == "current"
+          and base_res.kurs_boerse == base_res.kurs_boerse and base_res.kurs_boerse > 0):
+        # v67: Default-Kurs konsistent zur konfigurierten Aktienbasis
+        price = base_res.kurs_boerse
     else:
-        price = mcap.value / base_res.shares
+        price = mcap.value / base_res.shares_current
     if price != price or price <= 0:
         return {"mos": pd.DataFrame(), "vps": pd.DataFrame()}
 
@@ -604,17 +653,25 @@ def sensitivity_mos_base(m: TickerMetrics, cfg: dict, current_price: float | Non
     base_cap = float(dcfg.get("base_growth_cap", 0.06))
     g5 = 0.0 if cagr != cagr else min(cagr, base_cap)
 
+    # v67: Die konfigurierten Parameter (dcf.discount_rate/terminal_growth)
+    # sind immer Teil des Grids -- sonst fehlte der konfigurierte Base Case
+    # in der Tabelle, sobald er von den Default-Stuetzstellen abweicht.
+    r0 = float(dcfg.get("discount_rate", 0.09))
+    g0 = float(dcfg.get("terminal_growth", 0.025))
+    rates_grid = _merge_grid_points(discount_rates, r0)
+    growths_grid = _merge_grid_points(terminal_growths, g0)
+
     mos_rows, vps_rows = [], []
-    for r in discount_rates:
-        for g in terminal_growths:
+    for r in rates_grid:
+        for g in growths_grid:
             if r <= g:
                 mos_rows.append({"discount_rate": r, "terminal_growth": g,
                                  "value_per_share": nan, "mos": nan})
                 vps_rows.append({"discount_rate": r, "terminal_growth": g,
                                  "value_per_share": nan})
                 continue
-            sc = _dcf_scenario("base", g5, g, r, fcf_conv, base_res.shares, dcfg,
-                               net_debt=nd_conv)
+            sc = _dcf_scenario("base", g5, g, r, fcf_conv, base_res.shares_current,
+                               dcfg, net_debt=nd_conv)
             vps = sc.value_per_share
             mos = 1.0 - price / vps if (vps == vps and vps > 0) else nan
             mos_rows.append({"discount_rate": r, "terminal_growth": g,

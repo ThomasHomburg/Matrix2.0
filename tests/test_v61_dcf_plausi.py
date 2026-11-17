@@ -17,6 +17,7 @@ import pytest
 
 import app
 import run_ranking
+from data.loader import Metric
 from config import load_config
 from data.demo import demo_companies
 from data.metrics import fcf_yield
@@ -126,6 +127,9 @@ def test_evaluate_all_setzt_flags_bei_extremem_mos():
                      net_income=0.1 * rev, interest=0.1e9, tax=0.03 * rev, shares=1e9,
                      equity=50e9, net_debt=1e12, ocf=0.15 * rev, capex=0.03 * rev, sbc=0.0)
     m = _synthetic("EXT", "Extreme ND Corp", "Industrials", "US", 100e9, y)
+    # v67: Boersenkurs == Marktkap./Aktien (konsistent; ohne kurs wuerde bei
+    # share_basis=current kein kursbasierter Sanity-Vergleich durchgefuehrt)
+    m.price = Metric("price", 100.0, "USD", "USD", 2025)
     cfg = _cfg()
     rows, _excl = evaluate_all([m], cfg)
     r = rows[0]
