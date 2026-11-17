@@ -119,7 +119,21 @@ def compute_ttm(m: TickerMetrics, quarterly: dict) -> TtmResult:
     res.quarter_end = last_q.date().isoformat() if hasattr(last_q, "date") else str(last_q)
     res.base_label = f"TTM bis {res.quarter_end[:7]}"
 
-    currency = m.market_cap.currency if m.market_cap else "USD"
+    # v68 (Audit F1): TTM-Werte stammen aus den Quartals-Statements und
+    # liegen damit in der BERICHTSwaehrung -- nicht in der Quote-/Marktkap.-
+    # Waehrung. Der yfinance-Provider uebergibt sie als quarterly['currency']
+    # (einziger produktiver Aufrufer). Ohne Angabe Rueckfall auf die
+    # Marktkap.-Waehrung (altes Verhalten, Abwaertskompatibilitaet fuer
+    # Direktaufrufe) -- mit Warnung, da das bei abweichenden Waehrungen
+    # ein Mislabeling waere.
+    currency = quarterly.get("currency")
+    if not currency:
+        import logging
+        logging.getLogger("value_screener.ttm").warning(
+            "compute_ttm ohne quarterly['currency'] -- TTM-Waehrung wird aus "
+            "der Marktkap.-Waehrung abgeleitet (Rueckfall; bei abweichender "
+            "Berichtswaehrung unzulaessig)")
+        currency = m.market_cap.currency if m.market_cap else "USD"
     res.quarters_currency = currency
     fy_ttm = last_q.year
 

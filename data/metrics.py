@@ -40,10 +40,16 @@ def _tax_bounds() -> tuple[float, float, float]:
 
 
 class _NoFX:
-    """Fallback-Konverter ohne FX: Konvertierung nur bei gleicher Waehrung."""
+    """Fallback-Konverter ohne FX: Konvertierung nur bei gleicher Waehrung.
+
+    v68 (Audit F1): Eine leere/unbekannte Waehrung ("") ist keine valide
+    Waehrung -- zwei unbekannte Wahrungen werden NICHT als gleich angenommen
+    (das waere ein stilles Durchreichen moeglicherweise verschiedener
+    Waehrungen). Solche Werte scheiden sicher als NaN aus.
+    """
 
     def convert(self, value: float, from_cur: str, to_cur: str, year: int) -> float:
-        if from_cur.upper() == to_cur.upper():
+        if from_cur and to_cur and from_cur.upper() == to_cur.upper():
             return value
         return float("nan")
 
