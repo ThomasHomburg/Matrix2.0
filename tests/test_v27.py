@@ -42,16 +42,19 @@ def _ticker_with_ttm(fcf_fy: float = 100.0, fcf_q: float = 30.0,
             "shares_diluted": Metric("shares_diluted", shares, "shares", "USD", fy),
             "net_debt": Metric("net_debt", 0.0, "USD", "USD", fy),  # bekannt 0 (v66)
         }
+    # v69 (F2-B): 5 Quartalsspalten (4 TTM-Quartale + Vorgaengerquartal),
+    # damit das echte 12-Monats-Fenster nachweisbar ist (lueckenlose Kadenz).
     quarters = [pd.Timestamp("2026-08-31"), pd.Timestamp("2026-05-31"),
-                pd.Timestamp("2026-02-28"), pd.Timestamp("2025-11-30")]
+                pd.Timestamp("2026-02-28"), pd.Timestamp("2025-11-30"),
+                pd.Timestamp("2025-08-31")]
     cf = pd.DataFrame({
-        "Operating Cash Flow": [fcf_q + 10.0] * 4,
-        "Capital Expenditure": [-10.0] * 4,
-        "Free Cash Flow": [fcf_q] * 4,
-        "Stock Based Compensation": [sbc_q] * 4,
+        "Operating Cash Flow": [fcf_q + 10.0] * 5,
+        "Capital Expenditure": [-10.0] * 5,
+        "Free Cash Flow": [fcf_q] * 5,
+        "Stock Based Compensation": [sbc_q] * 5,
     }, index=quarters).T
-    inc = pd.DataFrame({"Total Revenue": [100.0] * 4}, index=quarters).T
-    bal = pd.DataFrame({"Net Debt": [0.0] * 4, "Stockholders Equity": [100.0] * 4},
+    inc = pd.DataFrame({"Total Revenue": [100.0] * 5}, index=quarters).T
+    bal = pd.DataFrame({"Net Debt": [0.0] * 5, "Stockholders Equity": [100.0] * 5},
                        index=quarters).T
     row_map = {"revenue": ["Total Revenue"],
                "operating_cashflow": ["Operating Cash Flow"],
@@ -92,8 +95,15 @@ def test_ttm_bleibt_durchschnitt_mit_gj():
     assert res.fcf_sources[0][0] == "TTM"
 
 
-def test_ttm_only_faellt_auf_avg3_zurueck_wenn_kein_ttm():
-    """Ohne TTM -> Rueckfall auf Ø3J (wie ttm-Modus)."""
+def test_ttm_only_ohne_ttm_dcf_na_kein_avg3_rueckfall():
+    """Ohne TTM -> DCF n/a (KEIN Rueckfall auf Ø3J).
+
+    v69-Fix (F2-B Entscheidungstabelle, Fall f): ttm_only darf unter keinen
+    Umstaenden auf _avg_fcf_start zurueckfallen -- ein Ø3J-Ersatz haette
+    einen reiner-TTM-Scorecard-Wert (mos_ttm_only/iv_ttm_only) geliefert,
+    der tatsaechlich auf Geschaeftsjahren basiert (stilles Label-Mismatch).
+    Doku: beim Modus-Paar auto/ttm bleibt der Ø3J-Rueckfall bestehen
+    (transparent via ttm_window_status)."""
     m = TickerMetrics(ticker="T", country="US")
     m.market_cap = Metric("market_cap", 1000.0, "USD", "USD", 2025)
     rev = 1000.0
@@ -105,9 +115,16 @@ def test_ttm_only_faellt_auf_avg3_zurueck_wenn_kein_ttm():
             "shares_diluted": Metric("shares_diluted", 10.0, "shares", "USD", fy),
         }
     res = compute_dcf(m, DCF_CFG, fcf_mode="ttm_only")
-    assert res.fcf_normalized == pytest.approx(100.0)
-    assert res.fcf_basis == "annual"        # Rueckfall Ø3J
-    assert res.fcf_years_used == 3
+    assert math.isnan(res.fcf_normalized)   # DCF n/a, KEIN Ø3J-Ersatz
+    assert res.fcf_years_used == 0
+    assert res.fcf_sources == []
+    assert res.ttm_window_status == "nicht_verfuegbar"
+    # Referenz: derselbe Ticker im ttm-Modus faellt weiterhin transparent
+    # auf Ø3J zurueck (unveraenderte bestehende Rueckfallkette)
+    res_ttm = compute_dcf(m, DCF_CFG, fcf_mode="ttm")
+    assert res_ttm.fcf_normalized == pytest.approx(100.0)
+    assert res_ttm.fcf_basis == "annual"
+    assert res_ttm.ttm_window_status == "nicht_verfuegbar"
 
 
 def test_ttm_only_unterscheidet_sich_von_ttm_und_avg3():

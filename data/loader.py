@@ -85,6 +85,14 @@ class TickerMetrics:
     # Exaktes Geschaeftsjahres-Enddatum je Jahr (ISO) -- fuer die TTM-Basis
     # (nicht ueberlappende Geschaeftsjahre vor dem TTM-Fenster).
     fiscal_ends: dict[int, str] = field(default_factory=dict)
+    # v69 (F2-B): Zustand der Kurs-EINHEIT (GBp/GBX-Thematik) des Providers:
+    #   "roh_gb_pence"  -- yfinance currency GBp/GBX: Kurs in Pence, Marktkap.
+    #                     faktisch GBP (Majors) -> shares_current gesperrt
+    #   "unbekannt"     -- GBP-Familie ohne Normalisierungsnachweis -> gesperrt
+    #   "normalisiert"  -- Einheit eindeutig (Majors) bzw. zentral normalisiert
+    # Der Normalizer selbst ist NICHT Teil von F2-B; das Gate wertet nur
+    # das Feld aus (kein String-Raten aus "GBP").
+    fx_unit_state: str = "unbekannt"
 
     # ---------- v64: Serialisierung (Resume-Cache run_ranking.py) ----------
 
@@ -113,6 +121,7 @@ class TickerMetrics:
             "ebitda_unplausible": self.ebitda_unplausible,
             "ttm": ttm_to_dict(self.ttm) if self.ttm is not None else None,
             "ttm_plausible": self.ttm_plausible,
+            "fx_unit_state": self.fx_unit_state,
             "ttm_fallback": self.ttm_fallback,
             "fiscal_ends": {int(fy): d for fy, d in self.fiscal_ends.items()},
         }
@@ -159,6 +168,8 @@ class TickerMetrics:
         m.ttm = ttm_from_dict(ttm_raw) if ttm_raw else None
         m.ttm_plausible = bool(data.get("ttm_plausible", True))
         m.ttm_fallback = bool(data.get("ttm_fallback") or False)
+        # v69: fehlendes Feld (alte Cache-Eintraege) -> "unbekannt" (konservativ)
+        m.fx_unit_state = str(data.get("fx_unit_state") or "unbekannt")
         fiscal = data.get("fiscal_ends")
         if fiscal:
             if not isinstance(fiscal, dict):
@@ -271,6 +282,11 @@ def extract_metrics(
             # gegenueber FCF/EBIT/Nettogewinn aus den Statements.
             # Hinweis: mktCap ist die AKTUELLE Marktkapitalisierung, nicht
             # der Stand zum jeweiligen Berichtsjahr.
+            # v69 (F2-B): Die USD-Semantik ist eine DOKUMENTIERTE, noch zu
+            # verifizierende QUELLENANNAHME (FMP-Dokumentation; keine
+            # Live-Verifizierung erfolgt). Bei GBP-Familie-Tickern sperrt
+            # das shares_current-Gate den Zustand "unbekannt" konservativ.
+            # Die Kennzeichnung "USD" ist NICHT als Live-Beweis zu lesen.
             from datetime import date
             result.market_cap = _metric("market_cap", float(mcap), "USD", "USD",
                                         all_years[0] if all_years else 0)
@@ -278,7 +294,11 @@ def extract_metrics(
         # v62: Boersen-Schlusskurs aus dem Profil (FMP profile.price), falls vorhanden
         pr = profile.get("price") if profile else None
         if pr is not None:
-            cur = (profile.get("currency") or "USD").upper()
+            # v69 (F2-B): fehlendes profile.currency -> unbekannte Preis-
+            # waehrung (LEERES Label, KEIN USD-Fallback): eine unterstellte
+            # Waehrung wuerde im shares_current-Gate zu scheinbar gueltigen
+            # Aktienzahlen fuehren. Nachgelagerte Pruefungen scheiden NaN aus.
+            cur = str(profile.get("currency") or "").upper().strip()
             result.price = _metric("price", float(pr), cur, cur, all_years[0] if all_years else 0)
             from datetime import date as _d
             result.price_date = _d.today().isoformat()

@@ -306,7 +306,9 @@ def test_scorecard_dcf_price_current():
     pipe_src = inspect.getsource(pipeline_mod)
     assert "dcf_comparison_price(" in app_src
     assert "dcf_comparison_price(" in pipe_src
-    assert "sensitivity_mos_base(m, CFG, current_price=price)" in app_src
+    # v69: Sensitivitaet erhaelt den DCF-Vergleichskurs UND denselben
+    # FXConverter (identische FX-/Periodenregeln wie compute_dcf)
+    assert "sensitivity_mos_base(m, CFG, current_price=price, fx=get_fx())" in app_src
 
 
 # ---------- (10) dcf_comparison_price: Unit-Tests der Kursauswahl ----------

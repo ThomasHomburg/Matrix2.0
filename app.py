@@ -35,11 +35,25 @@ from data.providers.base import ProviderError, build_providers, load_with_provid
 from data.tickerlist import load_ticker_file, parse_ticker_csv, parse_ticker_text
 from scoring.criteria import compute_criteria
 from scoring.pipeline import evaluate_all, evaluate_ticker, rank_rows
+from data.fx import build_fx
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("value_screener.app")
 
 CFG = load_config()
+
+# v69 (F2-B): EIN zentraler FXConverter je App-Prozess (lazy, identisch zu
+# run_ranking.py): manuelle Kurse + SQLite-Cache auch ohne FMP_API_KEY
+# nutzbar, FMP-Abruf nur mit Key; wird an alle Berechnungspfade
+# (evaluate_ticker/compute_criteria/compute_dcf/Sensitivitaet) weitergereicht.
+_FX = None
+
+
+def get_fx():
+    global _FX
+    if _FX is None:
+        _FX = build_fx(CFG, api_key=os.environ.get("FMP_API_KEY", ""))
+    return _FX
 
 
 # --- Daten laden (gecacht) ---------------------------------------------------
@@ -346,7 +360,7 @@ def page_scorecard() -> None:
     tickers = [r["ticker"] for r in rows]
     choice = st.selectbox("Unternehmen", tickers, format_func=lambda t: f"{t} – {next((r['name'] for r in rows if r['ticker'] == t))}")
     m = next(c for c in companies if c.ticker == choice)
-    res = evaluate_ticker(m, CFG)
+    res = evaluate_ticker(m, CFG, fx=get_fx())
     result = res["score"]
     criteria = res["criteria"]
 
@@ -683,7 +697,7 @@ def page_scorecard() -> None:
 def _formula_block(m: TickerMetrics, label: str) -> None:
     """Kompakte Formel-Anzeige fuer einen Ticker: ROIC 5J, FCF-Yield, ND/EBITDA."""
     st.markdown(f"### {label} – {m.name} ({m.ticker})  ·  Quelle: {m.source or 'unbekannt'}")
-    crit = compute_criteria(m, CFG)
+    crit = compute_criteria(m, CFG, fx=get_fx())
     latest_fy = max(m.years)
 
     # ROIC 5J
@@ -892,7 +906,7 @@ def dcf_section(m: TickerMetrics, row: dict | None) -> None:
     Barwert), Terminal Value, Nettoverschuldung, Aktien, innerer Wert je Aktie,
     Kurs und MoS je Szenario + Sensitivitaetstabelle."""
     from valuation.dcf import compute_dcf, sensitivity_mos_base
-    dcf = compute_dcf(m, CFG)
+    dcf = compute_dcf(m, CFG, fx=get_fx())
     dc = CFG["dcf"]
     if dcf.fcf_normalized != dcf.fcf_normalized or not dcf.scenarios:
         st.info("DCF nicht berechenbar (kein FCF nach SBC oder keine Marktkapitalisierung).")
@@ -1067,7 +1081,7 @@ def dcf_section(m: TickerMetrics, row: dict | None) -> None:
     mode_rows = []
     for mode, label in (("avg3", "Ø letzte 3 GJ"), ("latest", "Jüngstes GJ"),
                         ("ttm", "TTM Ø (TTM + 2 GJ)"), ("ttm_only", "TTM (4 Quartale, ohne Ø)")):
-        dcf_m = compute_dcf(m, CFG, fcf_mode=mode)
+        dcf_m = compute_dcf(m, CFG, fx=get_fx(), fcf_mode=mode)
         base_m = dcf_m.scenarios.get("base")
         mos_m = dcf_m.margin_of_safety
         vps_m = base_m.value_per_share if base_m is not None else float("nan")
@@ -1110,7 +1124,7 @@ def dcf_section(m: TickerMetrics, row: dict | None) -> None:
     # share_basis=current ohne kurs_boerse) wuerde die Funktion intern auf
     # den FY-basierten Default-Kurs zurueckfallen -- stattdessen n/a.
     if price is not None:
-        sens = sensitivity_mos_base(m, CFG, current_price=price)
+        sens = sensitivity_mos_base(m, CFG, current_price=price, fx=get_fx())
     else:
         sens = {"mos": pd.DataFrame(), "vps": pd.DataFrame()}
         st.info("Sensitivitaet n/a -- kein zur Aktienbasis passender "
@@ -1416,7 +1430,7 @@ def _screener_data_cached(tickers: tuple[str, ...], years: int, imported: bool):
             if len(tickers) <= 5:
                 label += "  " + ", ".join(tickers)
             source, kind = label, "live"
-    rows, excluded = evaluate_all(companies, CFG)
+    rows, excluded = evaluate_all(companies, CFG, fx=get_fx())
     return rows, excluded, source, kind, companies
 
 

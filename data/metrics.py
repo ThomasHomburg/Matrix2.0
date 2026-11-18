@@ -53,6 +53,46 @@ class _NoFX:
             return value
         return float("nan")
 
+    # v69 (F2-B): neue FX-Semantiken (Stock/Flow/Current) als Null-Fallback --
+    # gleiche Waehrung unverändert, Mismatch NaN (kein Kurs, kein 1:1).
+    def convert_stock(self, value: float, from_cur: str, to_cur: str,
+                      as_of=None) -> float:
+        if from_cur and to_cur and from_cur.upper() == to_cur.upper():
+            return value
+        return float("nan")
+
+    def convert_flow(self, value: float, from_cur: str, to_cur: str,
+                     start=None, end=None) -> float:
+        if from_cur and to_cur and from_cur.upper() == to_cur.upper():
+            return value
+        return float("nan")
+
+    def convert_current(self, value: float, from_cur: str, to_cur: str) -> float:
+        if from_cur and to_cur and from_cur.upper() == to_cur.upper():
+            return value
+        return float("nan")
+
+
+def fy_flow_window(m: "TickerMetrics", fy: int) -> "tuple[object, object]":
+    """v69 (F2-B): FY-Fenster [fiscal_ends[fy-1]+1, fiscal_ends[fy]] (Dates).
+
+    Nur bei beidseitig bekannten, plausiblen Stichtagsabstaenden (280-380
+    Tage). Unzuverlaessig -> (None, None) -- keine stille
+    Kalenderjahr-/Jahresend-Naeherung. Gleichbedeutend: fehlendes Vorjahres-
+    ende macht das Fenster unbestimmbar (Konservativ, NaN downstream).
+    """
+    import datetime as _dt
+    fe = (m.fiscal_ends.get(fy) or "")[:10]
+    fe_prev = (m.fiscal_ends.get(fy - 1) or "")[:10]
+    try:
+        de = _dt.date.fromisoformat(fe)
+        dp = _dt.date.fromisoformat(fe_prev)
+    except ValueError:
+        return None, None
+    if not (280 <= (de - dp).days <= 380):
+        return None, None
+    return dp + _dt.timedelta(days=1), de
+
 
 def _nan(*vals: float) -> bool:
     return any(math.isnan(v) for v in vals)
@@ -163,7 +203,14 @@ def fcf_yield(m: TickerMetrics, fy: int, fx=None) -> float:
     if m.market_cap.value == 0:
         return float("nan")
     converter = fx or _NoFX()
-    fcf_conv = converter.convert(fcf.value, fcf.currency, m.market_cap.currency, fy)
+    if fcf.currency and m.market_cap.currency and fcf.currency == m.market_cap.currency:
+        return fcf.value / m.market_cap.value
+    # v69 (F2-B): FCF ist eine STROMgroesse -> Perioden-O ueber das echte
+    # FY-Fenster statt des bisherigen Jahresendkurses.
+    d0, d1 = fy_flow_window(m, fy)
+    fcf_conv = (converter.convert_flow(fcf.value, fcf.currency,
+                                      m.market_cap.currency, d0, d1)
+                if d0 is not None else float("nan"))
     if _nan(fcf_conv):
         return float("nan")
     return fcf_conv / m.market_cap.value
@@ -181,7 +228,13 @@ def fcf_yield_sbc(m: TickerMetrics, fy: int, fx=None) -> float:
     if m.market_cap.value == 0:
         return float("nan")
     converter = fx or _NoFX()
-    fcf_conv = converter.convert(fcf.value, fcf.currency, m.market_cap.currency, fy)
+    if fcf.currency and m.market_cap.currency and fcf.currency == m.market_cap.currency:
+        return fcf.value / m.market_cap.value
+    # v69 (F2-B): wie fcf_yield -- Perioden-O ueber das echte FY-Fenster
+    d0, d1 = fy_flow_window(m, fy)
+    fcf_conv = (converter.convert_flow(fcf.value, fcf.currency,
+                                      m.market_cap.currency, d0, d1)
+                if d0 is not None else float("nan"))
     if _nan(fcf_conv):
         return float("nan")
     return fcf_conv / m.market_cap.value

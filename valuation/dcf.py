@@ -21,10 +21,28 @@ Fehlende Daten -> NaN, nie 0 (CLAUDE.md).
 
 from __future__ import annotations
 
+import datetime as _dt
 import math
 from dataclasses import dataclass, field
 
 from data.loader import TickerMetrics
+from data.metrics import fy_flow_window
+
+# v69 (F2-B): Fenster-Plausibilitaet -- Quartalsabstaende, TTM-Gesamtspanne
+# (12 Monate ± Puffer) und FY-Laenge. Konservativ: Verletzung -> Fenster
+# unzuverlaessig -> Quelle unbrauchbar (KEINE stille Monatsnaeherung).
+_QUARTER_GAP_MIN_DAYS = 60
+_QUARTER_GAP_MAX_DAYS = 120
+_TTM_SPAN_MIN_DAYS = 340
+_TTM_SPAN_MAX_DAYS = 390
+_FY_LEN_MIN_DAYS = 280
+_FY_LEN_MAX_DAYS = 380
+
+# v69-Fix: globale Ursachenprioritaet fuer fehlgeschlagene FCF-Quellen-
+# Konvertierungen (Aggregation ueber ALLE Quellen, kein first-fail-Return):
+# fehlende Währung/unparsebares Label -> TTM-Fenster -> FY-Fenster -> Kurs.
+_FCF_FAIL_PRIORITY = ("quelle_unbekannt", "fenster_unzuverlaessig",
+                     "fy_fenster_unzuverlaessig", "fx_fehlgeschlagen")
 
 
 @dataclass
@@ -68,6 +86,16 @@ class DcfResult:
     net_debt_known: bool = False      # v66: True nur bei bekannter UND in Marktkap.-Waehrung konvertierbarer Nettoverschuldung (inkl. bekanntem Wert 0)
     net_debt_status: str = "unbekannt"  # v66: bekannt_null | bekannt_positiv | bekannt_negativ | unbekannt | unvollstaendig | fx_fehlgeschlagen
     mos_base_alt: float = float("nan")   # MoS (Base) mit alternativer Nettoverschuldung
+    # --- v69 (F2-B): FX-/Perioden-Transparenz -------------------------------
+    fcf_fx_status: str = ""            # ok | fx_fehlgeschlagen | fenster_unzuverlaessig | fy_fenster_unzuverlaessig | quelle_unbekannt (fehlende Quell-/Zielwaehrung ODER unparsebares Label)
+    fcf_window_basis: str = ""         # quartalsdaten | unzuverlaessig (nur bei TTM-Quelle)
+    # v69-Fix: Ergebnis der Periodenfenster-Pruefung und der daraus folgenden
+    # Verwendung der TTM-Quelle. Nie WIDERSPRUCHSARTIG zu fcf_fx_status:
+    # unbekannte Waehrung -> "" (Ursache steht allein in fcf_fx_status).
+    ttm_window_status: str = ""        # "" | nicht_verfuegbar | quartalsdaten | fenster_unzuverlaessig | fenster_unzuverlaessig_geskippt | nicht_erforderlich_gleiche_waehrung
+    net_debt_fx_asof: str = ""         # Stichtag des fuer die ND-Konvertierung verwendeten Kurses (ISO)
+    net_debt_conv: float = float("nan")  # ND in Marktkap.-Waehrung (fuer Sensitivitaet, identische Regeln)
+    shares_current_status: str = ""    # ok | waehrung_unbekannt | einheit_unklar | fx_fehlgeschlagen
     scenario_growth: dict = field(default_factory=dict)  # {"bear": g5, "base": g5, "bull": g5}
 
 
@@ -132,6 +160,173 @@ def _dcf_scenario(name: str, g5: float, g_terminal: float, rate: float,
     )
 
 
+def _ttm_fx_window(ttm, key: str) -> "tuple[_dt.date | None, _dt.date | None, str]":
+    """v69 (F2-B): TTM-Fenster aus den TATSAECHLICH verwendeten Quartalen.
+
+    Basis ist TtmResult.flow_quarters_used[key] (die vier Quartalsenden, die
+    tatsaechlich in die TTM-Summe eingegangen sind -- nicht pauschal
+    quarters[0:4]). Belastbar (basis="quartalsdaten") nur, wenn
+    1. genau 4 paarweise verschiedene, ISO-parsebare Quartalsenden,
+    2. aufsteigend sortierte Abstaende in [60, 120] Tagen (erkennt
+       uebersprungene Quartale beim Nachziehen aelterer Werte),
+    3. die Gesamtspanne in [340, 390] Tagen (12 Monate ± Puffer),
+    4. ein UNMITELBAR davor liegendes Quartalsende aus ttm.quarters
+       existiert, dessen Abstand zum aeltesten verwendeten Ende ebenfalls
+       in [60, 120] Tagen liegt (Fenster-Anfang = Vorgaenger + 1 Tag).
+    Jede Verletzung -> (None, None, "unzuverlaessig"): die Quelle wird bei
+    der Periodenabgrenzung als unzuverlaessig behandelt (kein Mix mit FY,
+    keine Monats-/Neunmonatsnaeherung).
+    """
+    used = ((getattr(ttm, "flow_quarters_used", None) or {}).get(key))
+    if not used or len(used) != 4:
+        return None, None, "unzuverlaessig"
+    dates: list[_dt.date] = []
+    for u in used:
+        try:
+            dates.append(_dt.date.fromisoformat(str(u)[:10]))
+        except (ValueError, TypeError):
+            return None, None, "unzuverlaessig"
+    d = sorted(dates)
+    if len(set(d)) != 4:
+        return None, None, "unzuverlaessig"
+    # Abstaende der vier verwendeten Quartale (uebersprungene Quartale beim
+    # Nachziehen aelterer Werte erzeugen hier >120-Tage-Spruenge)
+    for i in range(3):
+        gap = (d[i + 1] - d[i]).days
+        if not (_QUARTER_GAP_MIN_DAYS <= gap <= _QUARTER_GAP_MAX_DAYS):
+            return None, None, "unzuverlaessig"
+    pred = None
+    for q in (getattr(ttm, "quarters", None) or []):
+        raw = str((q or {}).get("quarter_end", "") or "")[:10]
+        try:
+            qd = _dt.date.fromisoformat(raw)
+        except (ValueError, TypeError):
+            continue
+        if qd < d[0] and (pred is None or qd > pred):
+            pred = qd
+    if pred is None or not (_QUARTER_GAP_MIN_DAYS <= (d[0] - pred).days
+                            <= _QUARTER_GAP_MAX_DAYS):
+        return None, None, "unzuverlaessig"
+    # Gesamtspanne des 12-Monats-Fensters: Vorgaenger -> neuestes verwendetes
+    # Ende (nicht die verwendeten Ende untereinander -- die spannen nur ~9 Monate).
+    span = (d[3] - pred).days
+    if not (_TTM_SPAN_MIN_DAYS <= span <= _TTM_SPAN_MAX_DAYS):
+        return None, None, "unzuverlaessig"
+    return pred + _dt.timedelta(days=1), d[3], "quartalsdaten"
+
+
+def _shares_current_gate(m: TickerMetrics, mcap, kurs: float, fx
+                         ) -> "tuple[float, str]":
+    """v69 (F2-B): Waehrungs-/Einheiten-Gate fuer shares_current = mcap/kurs.
+
+    1. Beide Waehrungen muessen BEKANNT sein (leer = unbekannt, v68).
+    2. GBP-Familie (GBP/GBp/GBX) nur bei eindeutig normalisierter Einheit
+       (TickerMetrics.fx_unit_state == "normalisiert"); "roh_gb_pence"
+       (Kurs in Pence, Marktkap. in GBP-Majors, Faktor 100) und
+       "unbekannt" werden GESPERRT -> kein scheinbar gueltiger Wert.
+       Kein Raten allein aus dem String "GBP" -- nur das Zustandsfeld.
+    3. Identische Waehrung -> Division; verschiedene bekannte Waehrungen ->
+       Konvertierung des Kurses NUR mit aktuellem Kurs (convert_current,
+       Altersgrenze fx.current_max_age_days), sonst NaN. KEIN FY-Rueckfall.
+    Rueckgabe (shares, status); status != "ok" -> shares NaN.
+    """
+    nan = float("nan")
+    mc_cur = (mcap.currency or "").upper().strip()
+    pr = m.price
+    pr_cur = (pr.currency or "").upper().strip() if pr is not None else ""
+    if not mc_cur or not pr_cur:
+        return nan, "waehrung_unbekannt"
+    state = str(getattr(m, "fx_unit_state", "unbekannt") or "unbekannt")
+    gbp_family = mc_cur.startswith("GB") or pr_cur.startswith("GB")
+    if gbp_family and state != "normalisiert":
+        return nan, "einheit_unklar"
+    if mc_cur == pr_cur:
+        return mcap.value / kurs, "ok"
+    converter = fx
+    if converter is None:
+        from data.metrics import _NoFX
+        converter = _NoFX()
+    kurs_conv = converter.convert_current(kurs, pr_cur, mc_cur)
+    if kurs_conv != kurs_conv or kurs_conv <= 0:
+        return nan, "fx_fehlgeschlagen"
+    return mcap.value / kurs_conv, "ok"
+
+
+def _convert_fcf_sources(m: TickerMetrics, start: dict, converter, to_cur: str
+                          ) -> "tuple[float, str, str]":
+    """v69 (F2-B): konvertiert JEDE FCF-Quelle einzeln (eigene Waehrung,
+    eigener Zeitraum: TTM-Fenster aus den verwendeten Quartalen, FY-Fenster
+    aus fiscal_ends), DANN erst Mitteln -- Gewichtung und Quellenauswahl
+    bleiben unveraendert. Identische Waehrungen benoetigen keinen FX-Kurs
+    (die Periodenabgrenzung wurde bereits in _ttm_fcf_start geprueft).
+    Eine nicht konvertierbare Quelle macht das Ergebnis NaN (kein stiller
+    Ersatz). Rueckgabe (wert, fx_status, window_basis).
+
+    v69-Fix: Ursachenreihenfolge je Quelle UND globale Aggregation --
+    1. identische Waehrung -> Kurzschluss (Wert, kein FX noetig)
+    2. fehlende Quell-/Zielwaehrung -> quelle_unbekannt (VOR jeder
+       Fensterbestimmung -- nie als fx_fehlgeschlagen klassifiziert)
+    3. FY-Label parsen (VOR fy_flow_window): unparsebar -> quelle_unbekannt
+    4. TTM-/FY-Fenster unzuverlaessig -> fenster_unzuverlaessig /
+       fy_fenster_unzuverlaessig
+    5. Fenster/Stichtag vorhanden, Konvertierung NaN -> fx_fehlgeschlagen
+    Fehlerhafte Quellen werden gesammelt; zurueckgegeben wird der
+    hoechstpriorisierte Status ueber ALLE Quellen (_FCF_FAIL_PRIORITY)
+    statt der Ursache der zuerst geprueften Quelle. Erfolgreiche
+    Konvertierungen und die Mittelwertbildung bleiben unveraendert.
+    """
+    nan = float("nan")
+    sources = start.get("sources") or []
+    if not sources:
+        return nan, "fx_fehlgeschlagen", ""
+    to = (to_cur or "").upper().strip()
+    basis = ""
+    conv_vals: list[float] = []
+    fails: list[tuple[str, str]] = []   # (status, fensterbasis) je Quelle
+    for label, value, cur in sources:
+        c = (cur or "").upper().strip()
+        if c and c == to:
+            conv_vals.append(float(value))
+            continue
+        # 2) fehlende Waehrung -> quelle_unbekannt (vor Fensterbestimmung)
+        if not c or not to:
+            fails.append(("quelle_unbekannt", ""))
+            continue
+        lbl = str(label)
+        if lbl.startswith("TTM"):
+            ttm = getattr(m, "ttm", None)
+            d0, d1, w_basis = _ttm_fx_window(ttm, start.get("ttm_key") or "fcf_sbc")
+            if d0 is None:
+                fails.append(("fenster_unzuverlaessig", w_basis))
+                continue
+            basis = w_basis
+        else:
+            # 3) FY-Label parsen (VOR fy_flow_window)
+            try:
+                fy = int(str(lbl)[2:])
+            except ValueError:
+                fails.append(("quelle_unbekannt", ""))
+                continue
+            d0, d1 = fy_flow_window(m, fy)
+            if d0 is None:
+                fails.append(("fy_fenster_unzuverlaessig", ""))
+                continue
+        # 5) Fenster vorhanden, aber Konvertierung fehlgeschlagen
+        conv = converter.convert_flow(value, c, to, d0, d1)
+        if conv != conv:
+            fails.append(("fx_fehlgeschlagen", basis if lbl.startswith("TTM") else ""))
+            continue
+        conv_vals.append(conv)
+    if fails:
+        # globale Prioritaet statt Reihenfolge der Quellenpruefung
+        for status in _FCF_FAIL_PRIORITY:
+            for st, b in fails:
+                if st == status:
+                    return nan, st, b
+        return nan, fails[0][0], fails[0][1]
+    return sum(conv_vals) / len(conv_vals), "ok", basis
+
+
 def _ttm_fcf_start(m: TickerMetrics) -> dict | None:
     """TTM-Start-FCF: Ø aus TTM (letzte 4 Quartale) + bis zu 2 davor
     liegenden, NICHT ueberlappenden Geschaeftsjahren.
@@ -155,19 +350,27 @@ def _ttm_fcf_start(m: TickerMetrics) -> dict | None:
     if ttm_fcf is None or ttm_fcf.is_na():
         return None
     ttm_end = ttm.quarter_end  # ISO-Stichtag letztes Quartal
-    # erstes Quartal des TTM-Fensters = ttm_end - 9 Monate (Naeherung)
-    from datetime import date as _date
-    y, mo, _d = (int(x) for x in ttm_end.split("-"))
-    first_q_month = ((mo - 10) % 12) + 1   # 9 Monate vor Endmonat
-    first_q_year = y - (1 if mo <= 9 else 0)
-    window_start = _date(first_q_year, first_q_month, 1)
-    # Geschaeftsjahre, deren Enddatum STRICT vor dem TTM-Fenster liegt
+    # v69 (F2-B): Periodenabgrenzung aus dem ECHTEN TTM-Fenster (nachweislich
+    # verwendete Quartale) statt der bisherigen "9 Monate zurueck"-Naeherung.
+    # Ist das Fenster unzuverlaessig (Luecken/inkonsistente Komponenten-
+    # Quartale/kein Vorgaengerquartal), faellt die TTM-Quelle komplett weg
+    # (auch bei identischer Waehrung: keine Mittelung mit moeglicherweise
+    # ueberlappenden FY-Werten) -- bestehende Rueckfallkette greift (Ø3J).
+    ttm_metric_key = "fcf" if sbc_missing else "fcf_sbc"
+    window_start, _window_end, window_basis = _ttm_fx_window(ttm, ttm_metric_key)
+    if window_start is None or window_basis != "quartalsdaten":
+        return None
+    # Geschaeftsjahre, deren Enddatum STRICT vor dem TTM-Fenster-Anfang liegt
     prior_fys = []
     for fy in sorted(m.years, reverse=True):
         fe = m.fiscal_ends.get(fy)
         if not fe:
             continue
-        if _date.fromisoformat(fe) < window_start:
+        try:
+            fe_d = _dt.date.fromisoformat(str(fe)[:10])
+        except ValueError:
+            continue
+        if fe_d < window_start:
             prior_fys.append(fy)
     # Vorjahres-GJ ebenfalls auf Roh-FCF fallbacken, wenn deren fcf_sbc fehlt
     fy_vals_fb = []
@@ -189,6 +392,9 @@ def _ttm_fcf_start(m: TickerMetrics) -> dict | None:
                     + [(f"FY{fy}", v, c) for fy, v, c in fy_vals_fb]),
         "currency": ttm_fcf.currency,
         "sbc_missing": sbc_missing or None,
+        "ttm_key": ttm_metric_key,   # v69: Quelle des nachgewiesenen Fensters
+        "ttm_window_start": window_start.isoformat(),
+        "ttm_window_status": "quartalsdaten",   # v69-Fix: Fenster belastbar
     }
 
 
@@ -213,12 +419,38 @@ def _ttm_only_fcf_start(m: TickerMetrics) -> dict | None:
         sbc_missing = True
     if ttm_fcf is None or ttm_fcf.is_na():
         return None
+    # v69-Fix: Drei-Fall-Waehrungsentscheidung (Entscheidungstabelle) --
+    # ttm_only mischt NIE mit FY, daher ist bei identischen bekannten
+    # Waehrungen KEIN FX-Fenster erforderlich. Bei bekannten, aber
+    # unterschiedlichen Waehrungen bleibt das Fenster konservativ zwingend
+    # (TTM wird weitergereicht; die Konvertierung scheitert dann kontrolliert
+    # in _convert_fcf_sources -> fenster_unzuverlaessig, KEIN Ø3J-Fallback).
+    # Bei unbekannter Quell-/Zielwaehrung erhaelt das start-dict KEIN
+    # Fensterlabel -- die Ursache ist ausschliesslich quelle_unbekannt.
+    ttm_metric_key = "fcf" if sbc_missing else "fcf_sbc"
+    _ws, _we, w_basis = _ttm_fx_window(ttm, ttm_metric_key)
+    src_cur = (ttm_fcf.currency or "").upper().strip()
+    _mcap = getattr(m, "market_cap", None)
+    mcap_cur = ((_mcap.currency or "").upper().strip()
+                if _mcap is not None else "")
+    w_status = ""
+    if not (src_cur and mcap_cur):
+        w_status = ""            # unbekannte Waehrung -> kein Fensterlabel
+    elif w_basis == "quartalsdaten":
+        w_status = "quartalsdaten"
+    elif src_cur == mcap_cur:
+        w_status = "nicht_erforderlich_gleiche_waehrung"
+    else:
+        w_status = "fenster_unzuverlaessig"
     out = {
         "fcf": ttm_fcf.value,
         "years_used": 1,
         "quarter_end": ttm.quarter_end,
         "sources": [("TTM", ttm_fcf.value, ttm_fcf.currency)],
         "currency": ttm_fcf.currency,
+        "ttm_key": ttm_metric_key,
+        "ttm_window_start": _ws.isoformat() if _ws else "",
+        "ttm_window_status": w_status,
     }
     if sbc_missing:
         out["sbc_missing"] = True
@@ -269,7 +501,11 @@ def _net_debt_ex_customer_deposits(m: TickerMetrics, fcf_basis: str,
 
     Prioritaet: TTM-Bestand (Stichtag letztes Quartal) falls fcf_basis="ttm",
     sonst das neueste Geschaeftsjahr mit Bilanzdaten.
-    Rueckgabe: (wert, quelle, kundengelder, waehrung, qualitaet).
+    Rueckgabe: (wert, quelle, kundengelder, waehrung, qualitaet, as_of).
+    as_of (v69, F2-B): ISO-Stichtag der tatsaechlich verwendeten Bilanz --
+    TTM: ttm.quarter_end; FY: fiscal_ends[fy]; None ohne Ergebnis. Die
+    FX-Konvertierung (Bestandsgroesse) MUSS diesen Stichtag verwenden
+    (convert_stock, Look-ahead-sicher) -- niemals pauschal latest_fy.
     qualitaet (v66): "ok" | "fehlend" (keine Bilanzdaten zu ND/Schulden/Cash)
     | "unvollstaendig" (Bilanzdaten vorhanden, aber nicht kombinierbar,
     z. B. Total Debt ohne Cash). Ein bekannter Wert von 0 ist "ok" und
@@ -300,12 +536,12 @@ def _net_debt_ex_customer_deposits(m: TickerMetrics, fcf_basis: str,
                 src = (f"TTM (Stichtag {ttm.quarter_end}) "
                        f"Total Debt − (Cash + kurzfr. Anlagen)"
                        + (" + Kundengelder" if cd == cd else ""))
-                return adj, src, cd, cur, "ok"
+                return adj, src, cd, cur, "ok", str(ttm.quarter_end or "")[:10]
         if nd_m is not None and not nd_m.is_na():
             adj = nd_m.value + cd if cd == cd else nd_m.value
             src = (f"TTM (Stichtag {ttm.quarter_end})"
                    + (" + Kundengelder" if cd == cd else ""))
-            return adj, src, cd, nd_m.currency, "ok"
+            return adj, src, cd, nd_m.currency, "ok", str(ttm.quarter_end or "")[:10]
     for fy in sorted(m.years, reverse=True):
         y = m.years[fy]
         nd = y.get("net_debt")
@@ -326,18 +562,43 @@ def _net_debt_ex_customer_deposits(m: TickerMetrics, fcf_basis: str,
                 adj = td.value - liquid + (cd_v if cd_v == cd_v else 0.0)
                 src = (f"FY{fy} Total Debt − (Cash + kurzfr. Anlagen)"
                        + (" + Kundengelder" if cd_v == cd_v else ""))
-                return adj, src, cd_v, td.currency, "ok"
+                return adj, src, cd_v, td.currency, "ok", (m.fiscal_ends.get(fy) or "")[:10]
         if nd is not None and not nd.is_na():
             adj = nd.value + cd_v if cd_v == cd_v else nd.value
             src = f"FY{fy} net_debt" + (" + Kundengelder" if cd_v == cd_v else "")
-            return adj, src, cd_v, nd.currency, "ok"
+            return adj, src, cd_v, nd.currency, "ok", (m.fiscal_ends.get(fy) or "")[:10]
         if (td is not None and not td.is_na()
                 and cash is not None and not cash.is_na()):
             adj = td.value - cash.value + (cd_v if cd_v == cd_v else 0.0)
             src = f"FY{fy} total_debt - cash" + (" + Kundengelder" if cd_v == cd_v else "")
-            return adj, src, cd_v, td.currency, "ok"
+            return adj, src, cd_v, td.currency, "ok", (m.fiscal_ends.get(fy) or "")[:10]
     quality = "unvollstaendig" if saw_balance else "fehlend"
-    return nan, "n/a", nan, "", quality
+    return nan, "n/a", nan, "", quality, None
+
+
+def _ttm_skip_status(m: TickerMetrics) -> str:
+    """v69-Fix: Ursache des TTM-Skips (start=None bei TTM-Anforderung).
+
+    "fenster_unzuverlaessig_geskippt", wenn ein TTM-Wert existiert, das
+    Periodenfenster aber unzuverlaessig ist (-> transparenter Ø3J-Fallback
+    bei auto/ttm; D_a/kein Ø3J bei ttm_only); sonst "nicht_verfuegbar"
+    (kein TTM, unplausibel, Fallback aktiv, kein TTM-FCF-Wert oder -- bei
+    _ttm_fcf_start -- zu wenige nicht ueberlappende GJ).
+    """
+    ttm = getattr(m, "ttm", None)
+    if (ttm is None or not getattr(m, "ttm_plausible", True)
+            or getattr(m, "ttm_fallback", False)):
+        return "nicht_verfuegbar"
+    ttm_fcf = ttm.ttm.get("fcf_sbc")
+    key = "fcf_sbc"
+    if ttm_fcf is None or ttm_fcf.is_na():
+        ttm_fcf = ttm.ttm.get("fcf")
+        key = "fcf"
+    if ttm_fcf is None or ttm_fcf.is_na():
+        return "nicht_verfuegbar"
+    if _ttm_fx_window(ttm, key)[2] != "quartalsdaten":
+        return "fenster_unzuverlaessig_geskippt"
+    return "nicht_verfuegbar"
 
 
 def compute_dcf(m: TickerMetrics, cfg: dict, fx=None, fcf_mode: str | None = None) -> DcfResult:
@@ -372,17 +633,44 @@ def compute_dcf(m: TickerMetrics, cfg: dict, fx=None, fcf_mode: str | None = Non
     )
 
     # --- normalisierter FCF nach SBC (Startwert je fcf_mode) ----------------
+    # v69-Fix: ttm_only faellt NIE auf Ø3J zurueck (Entscheidungstabelle):
+    # kein verwendbarer TTM-Start -> DCF n/a. auto/ttm/avg3 behalten den
+    # bisherigen Ø3J-Rueckfall, aber transparent via ttm_window_status.
     start = None
+    ttm_requested = mode in ("auto", "ttm", "ttm_only")
+    ttm_skipped = False
     if mode in ("auto", "ttm"):
         start = _ttm_fcf_start(m)
+        if start is None:
+            ttm_skipped = True
     if start is None and mode == "ttm_only":
         start = _ttm_only_fcf_start(m)  # reiner TTM-Start (ohne Ø)
+        if start is None:
+            ttm_skipped = True
     if start is None and mode == "latest":
         start = _avg_fcf_start(m, 1)
-    if start is None and mode != "latest":
+    start_from_avg3 = False
+    if start is None and mode in ("auto", "ttm", "avg3"):
         start = _avg_fcf_start(m, int(dcfg.get("fcf_avg_years", 3)))
+        start_from_avg3 = True
     if start is None:
+        # v69-Fix: kein FCF bestimmbar -- bei angeforderter TTM-Basis wird
+        # die Skipp-Ursache transparent dokumentiert (D_a/kein Ø3J).
+        if ttm_skipped and ttm_requested:
+            # ttm_only: start=None kann nur "nicht_verfuegbar" bedeuten
+            # (bei vorhandenem TTM-Wert liefert _ttm_only_fcf_start immer
+            # ein start-dict); ein "geskippt"-Label waere hier irrefuehrend,
+            # da ttm_only niemals auf Ø3J zurueckfaellt.
+            result.ttm_window_status = (
+                "nicht_verfuegbar" if mode == "ttm_only"
+                else _ttm_skip_status(m))
         return result  # kein FCF bestimmbar (weder SBC noch Roh-FCF)
+    if start_from_avg3 and mode in ("auto", "ttm"):
+        # v69-Fix: TTM-Quelle wurde uebersprungen (Ø3J-Fallback aktiv) --
+        # Differenzierung geskippt/nicht_verfuegbar fuer DQ/Missing-Grund
+        result.ttm_window_status = _ttm_skip_status(m)
+    elif not result.ttm_window_status:
+        result.ttm_window_status = str(start.get("ttm_window_status", "") or "")
     result.sbc_missing = bool(start.get("sbc_missing", False))
     result.fcf_le0 = (start["fcf"] <= 0) if start["fcf"] == start["fcf"] else False
     result.fcf_normalized = start["fcf"]
@@ -443,15 +731,25 @@ def compute_dcf(m: TickerMetrics, cfg: dict, fx=None, fcf_mode: str | None = Non
     result.kurs_boerse = kurs_boerse
     shares_eff = result.shares
     if share_basis == "current" and kurs_boerse == kurs_boerse:
-        shares_eff = mcap.value / kurs_boerse
+        # v69 (F2-B): Waehrungs-/Einheiten-Gate (bekannte Waehrungen,
+        # GBp/GBX-Sperre bis Normalisierung, convert_current bei Mismatch).
+        # Gate-Fehler -> NaN, KEIN Rueckfall auf FY-Aktien (Rev.-2-Entscheidung).
+        shares_eff, gate_status = _shares_current_gate(m, mcap, kurs_boerse, fx)
+        result.shares_current_status = gate_status
+        if gate_status != "ok":
+            shares_eff = float("nan")
     result.shares_current = shares_eff
     converter = fx
     if converter is None:
         from data.metrics import _NoFX
         converter = _NoFX()
-    latest_fy = max(m.years)
-    fcf_conv = converter.convert(result.fcf_normalized, start["currency"],
-                                 mcap.currency, latest_fy)
+    # v69 (F2-B): JEDE Quelle einzeln mit eigener Waehrung/Zeitraum konvertieren
+    # (TTM-Fenster aus den verwendeten Quartalen, FY-Fenster aus fiscal_ends),
+    # DANN erst mitteln -- Gewichtung/Quellenauswahl unveraendert.
+    fcf_conv, fcf_fx_status, fcf_window_basis = _convert_fcf_sources(
+        m, start, converter, mcap.currency)
+    result.fcf_fx_status = fcf_fx_status
+    result.fcf_window_basis = fcf_window_basis
     if math.isnan(fcf_conv):
         return result
     result.fcf_normalized_conv = fcf_conv
@@ -462,21 +760,37 @@ def compute_dcf(m: TickerMetrics, cfg: dict, fx=None, fcf_mode: str | None = Non
         nd_mode = "reported"
     result.net_debt_mode = nd_mode
     alt_mode = "incl_sti" if nd_mode == "reported" else "reported"
-    nd_rep, nd_src, cd_val, nd_cur, nd_qual = _net_debt_ex_customer_deposits(
+    nd_rep, nd_src, cd_val, nd_cur, nd_qual, nd_asof = _net_debt_ex_customer_deposits(
         m, result.fcf_basis, net_debt_mode=nd_mode)
-    nd_alt, nd_alt_src, _cd_alt, nd_alt_cur, _nd_alt_qual = _net_debt_ex_customer_deposits(
+    nd_alt, nd_alt_src, _cd_alt, nd_alt_cur, _nd_alt_qual, nd_alt_asof = _net_debt_ex_customer_deposits(
         m, result.fcf_basis, net_debt_mode=alt_mode)
     result.net_debt = nd_rep
     result.net_debt_source = nd_src
     result.customer_deposits = cd_val
     result.net_debt_alt = nd_alt
     result.net_debt_alt_source = nd_alt_src
+    # v69 (F2-B): ND ist eine Bestandsgroesse -> Stichtagskurs zum ECHTEN
+    # Bilanzstichtag (TTM-Quartalsende bzw. FY-Ende), niemals pauschal
+    # latest_fy. Identische Waehrungen benoetigen keinen Kurs (Identity,
+    # Stichtag bleibt fuer die Transparenz dokumentiert); unterschiedliche
+    # Waehrungen OHNE Stichtag -> NaN (FX-Haertung convert_stock).
+    _mc_cur = (mcap.currency or "").upper().strip()
     nd_conv = nan
     if nd_rep == nd_rep and nd_cur:
-        nd_conv = converter.convert(nd_rep, nd_cur, mcap.currency, latest_fy)
+        if nd_cur.upper().strip() == _mc_cur and nd_cur:
+            nd_conv = nd_rep
+            result.net_debt_fx_asof = str(nd_asof or "")[:10]
+        elif nd_asof:
+            nd_conv = converter.convert_stock(nd_rep, nd_cur, mcap.currency, nd_asof)
+            result.net_debt_fx_asof = str(nd_asof)[:10] if nd_conv == nd_conv else ""
     nd_alt_conv = nan
     if nd_alt == nd_alt and nd_alt_cur:
-        nd_alt_conv = converter.convert(nd_alt, nd_alt_cur, mcap.currency, latest_fy)
+        if nd_alt_cur.upper().strip() == _mc_cur and nd_alt_cur:
+            nd_alt_conv = nd_alt
+        elif nd_alt_asof:
+            nd_alt_conv = converter.convert_stock(nd_alt, nd_alt_cur, mcap.currency,
+                                                  nd_alt_asof)
+    result.net_debt_conv = nd_conv
 
     # v66: Status der Nettoverschuldung -- bekannt (inkl. exakt 0) vs.
     # unbekannt vs. unvollstaendig vs. FX-Konvertierung fehlgeschlagen.
@@ -622,31 +936,16 @@ def sensitivity_mos_base(m: TickerMetrics, cfg: dict, current_price: float | Non
     if price != price or price <= 0:
         return {"mos": pd.DataFrame(), "vps": pd.DataFrame()}
 
-    # Start-FCF + Nettoverschuldung in Marktkap.-Waehrung (identisch zu compute_dcf)
-    converter = fx
-    if converter is None:
-        from data.metrics import _NoFX
-        converter = _NoFX()
-    latest_fy = max(m.years)
-    if base_res.fcf_basis == "ttm" and base_res.fcf_sources:
-        fcf_cur = base_res.fcf_sources[0][2]
-    else:
-        sbc_series = [m.years[fy]["fcf_sbc"] for fy in sorted(m.years)
-                      if "fcf_sbc" in m.years[fy] and not m.years[fy]["fcf_sbc"].is_na()]
-        fcf_cur = sbc_series[-1].currency
-    fcf_conv = converter.convert(base_res.fcf_normalized, fcf_cur,
-                                 mcap.currency, latest_fy)
-    if math.isnan(fcf_conv):
+    # v69 (F2-B): Start-FCF + Nettoverschuldung in Marktkap.-Waehrung --
+    # WIEDERVERWENDUNG der bereits in compute_dcf konvertierten Werte
+    # (fcf_normalized_conv / net_debt_conv). Damit nutzt die Sensitivitaet
+    # GARANTIERT dieselben FX- und Periodenregeln (je Quelle eigene
+    # Waehrung, TTM-Fenster, ND-Stichtagskurs) -- keine abweichende
+    # Parallelkonvertierung (z.B. Einzelkurs/Jahresend) mehr moeglich.
+    fcf_conv = base_res.fcf_normalized_conv
+    if fcf_conv != fcf_conv:
         return {"mos": pd.DataFrame(), "vps": pd.DataFrame()}
-    # Nettoverschuldung (ohne Kundengelder) wie in compute_dcf -> exakte Uebereinstimmung
-    nd_mode = str(dcfg.get("net_debt_mode", "reported")).lower()
-    if nd_mode not in ("reported", "incl_sti"):
-        nd_mode = "reported"
-    nd_rep, _nd_src, _cd, nd_cur, _nd_qual = _net_debt_ex_customer_deposits(
-        m, base_res.fcf_basis, net_debt_mode=nd_mode)
-    nd_conv = float("nan")
-    if nd_rep == nd_rep and nd_cur:
-        nd_conv = converter.convert(nd_rep, nd_cur, mcap.currency, latest_fy)
+    nd_conv = base_res.net_debt_conv
 
     # Base-Wachstum (min(CAGR, base_growth_cap)); identisch zu compute_dcf
     cagr = base_res.revenue_cagr

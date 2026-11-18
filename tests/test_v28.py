@@ -184,20 +184,28 @@ def test_reit_ohne_ffo_fcf_yield_na_und_hinweis(cfg):
 # --- (1) Bear/Bull je Modus -----------------------------------------------------
 
 def test_bear_bull_je_modus(cfg):
-    """Jeder fcf_mode liefert scenarios bear/base/bull mit Wert je Aktie."""
-    m = _mk(industry="Semiconductors")
-    for mode in ("avg3", "latest", "ttm", "ttm_only", "auto"):
+    """Jeder fcf_mode liefert scenarios bear/base/bull mit Wert je Aktie.
+
+    v69-Fix: ttm_only ohne TTM liefert KEINE Szenarien mehr (DCF n/a,
+    Ø3J-Entscheidungstabelle Fall f: kein Rueckfall auf Ø3J)."""
+    m = _mk(industry="Semiconductors")     # kein TTM-Objekt
+    for mode in ("avg3", "latest", "ttm", "auto"):
         dcf = compute_dcf(m, cfg, fcf_mode=mode)
         assert set(dcf.scenarios) == {"bear", "base", "bull"}, mode
         for sc in dcf.scenarios.values():
-            assert sc.value_per_share == sc.value_per_share or mode in ("ttm", "ttm_only")
+            assert sc.value_per_share == sc.value_per_share or mode == "ttm"
+    # ttm_only ohne TTM: DCF n/a (KEIN Ø3J-Ersatz, keine Szenarien)
+    dcf_only = compute_dcf(m, cfg, fcf_mode="ttm_only")
+    assert dcf_only.scenarios == {}
+    assert dcf_only.ttm_window_status == "nicht_verfuegbar"
 
 def test_bear_bull_je_modus_in_scorecard_tabelle(cfg):
     """Die Modus-Tabelle in app.py nutzt scenarios bear/bull je Modus --
     Smoke: compute_dcf liefert konsistente MoS je Szenario."""
     m = _mk(industry="Software - Application")
     price = m.market_cap.value / 2e9
-    for mode in ("avg3", "latest", "ttm", "ttm_only"):
+    # v69-Fix: ttm_only ohne TTM -> DCF n/a (kein Szenario, kein Ø3J-Ersatz)
+    for mode in ("avg3", "latest", "ttm"):
         dcf = compute_dcf(m, cfg, fcf_mode=mode)
         bear = dcf.scenarios["bear"]
         bull = dcf.scenarios["bull"]
