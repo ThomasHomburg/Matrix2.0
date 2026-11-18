@@ -52,10 +52,22 @@ class TtmResult:
     # "fcf_sbc", "yoy"} in Berichtswährung; yoy = FCF-SBC vs. Vorjahresquartal.
     quarters: list = field(default_factory=list)  # [{quarter_end, ocf, capex, sbc, fcf_sbc, yoy}]
     quarters_currency: str = ""
+    # v69 (F2-B): tatsaechlich verwendete Quartalsenden (ISO, aufsteigend
+    # unsortiert wie geliefert) je abgeleiteter Flussgroesse. None =
+    # inkonsistente/unbekannte Periodenmenge (z. B. OCF- und Capex-Quartale
+    # weichen ab) -> TTM-Fenster unzuverlaessig, KEINE stille Verwendung.
+    flow_quarters_used: dict[str, list[str] | None] = field(default_factory=dict)
 
 
 def _sum_last4(frames: dict, row_labels: dict[str, list[str]], key: str) -> tuple[float, list]:
-    """Summe der letzten 4 Quartale einer Flussgroesse; (wert, [quartalswerte])."""
+    """Summe der letzten 4 Quartale einer Flussgroesse.
+
+    v69 (F2-B): Rueckgabe (wert, verwendete_quartalsenden) -- die zweite
+    Komponente listet die QuartalsSPALTEN-Enden (ISO), die tatsaechlich in
+    die Summe eingegangen sind (Luecken fuehren zum Nachziehen aelterer
+    Quartale). Nur damit kann die FX-Fensterfunktion den Zeitraum der
+    tatsaechlich summierten Werte exakt abbilden. TTM-Werte unveraendert.
+    """
     df = frames.get(key)
     if df is None or df.empty:
         return float("nan"), []
@@ -72,12 +84,12 @@ def _sum_last4(frames: dict, row_labels: dict[str, list[str]], key: str) -> tupl
                     break
         if v == v:
             vals.append(v)
-            used.append(c)
+            used.append(c.date().isoformat() if hasattr(c, "date") else str(c)[:10])
         if len(vals) >= 4:
             break
     if len(vals) < 4:
-        return float("nan"), vals
-    return sum(vals), vals
+        return float("nan"), used
+    return sum(vals), used
 
 
 def _stock_value(df, labels: list[str], col) -> float:
@@ -181,15 +193,17 @@ def compute_ttm(m: TickerMetrics, quarterly: dict) -> TtmResult:
         "income_before_tax": inc, "shares_diluted": inc,
         "operating_cashflow": cf, "capex": cf, "stock_based_compensation": cf,
     }
+    flow_used: dict[str, list] = {}   # v69: verwendete Quartale je Komponente
     for key in FLOW_KEYS:
         if key in ("fcf", "fcf_sbc"):
             continue  # werden unten abgeleitet (FCF bevorzugt gemeldet, sonst OCF+Capex)
-        val, _qvals = _sum_last4({key: src_map.get(key)}, row_map, key)
+        val, used = _sum_last4({key: src_map.get(key)}, row_map, key)
+        flow_used[key] = used
         unit = "shares" if key == "shares_diluted" else "currency"
         res.ttm[key] = Metric(key, val, unit, currency, fy_ttm)
 
     # FCF TTM: gemeldeter 'Free Cash Flow' bevorzugt; sonst OCF + Capex (Capex negativ)
-    fcf_rep, _ = _sum_last4({"fcf": cf}, row_map, "fcf")
+    fcf_rep, fcf_rep_used = _sum_last4({"fcf": cf}, row_map, "fcf")
     ocf_v = res.ttm["operating_cashflow"].value
     capex_v = res.ttm["capex"].value
     if fcf_rep == fcf_rep:
@@ -205,6 +219,28 @@ def compute_ttm(m: TickerMetrics, quarterly: dict) -> TtmResult:
     sbc_v = res.ttm["stock_based_compensation"].value
     fcf_sbc = fcf_v - sbc_v if (fcf_v == fcf_v and sbc_v == sbc_v) else float("nan")
     res.ttm["fcf_sbc"] = Metric("fcf_sbc", fcf_sbc, "currency", currency, fy_ttm)
+
+    # v69 (F2-B): tatsaechlich verwendete Quartalsenden je abgeleiteter
+    # Groesse. Der Satz ist nur dann belastbar, wenn ALLE eingehenden
+    # Komponenten dieselben vier Quartale verwenden; andernfalls None
+    # (Fenster unzuverlaessig -> Quelle scheidet bei der Periodenabgrenzung
+    # aus, auch bei identischer Waehrung -- keine falsche Periodenzuordnung).
+    def _set4(u: list | None) -> list[str] | None:
+        return list(u) if u and len(u) == 4 else None
+
+    fcf_used: list[str] | None = None
+    if fcf_rep == fcf_rep:
+        fcf_used = _set4(fcf_rep_used)
+    elif ocf_v == ocf_v and capex_v == capex_v:
+        u_ocf, u_capex = flow_used.get("operating_cashflow"), flow_used.get("capex")
+        if u_ocf and u_capex and list(u_ocf) == list(u_capex):
+            fcf_used = _set4(u_ocf)
+    fcf_sbc_used: list[str] | None = None
+    if fcf_sbc == fcf_sbc and fcf_used is not None:
+        u_sbc = flow_used.get("stock_based_compensation")
+        if u_sbc and list(u_sbc) == list(fcf_used):
+            fcf_sbc_used = list(fcf_used)
+    res.flow_quarters_used = {"fcf": fcf_used, "fcf_sbc": fcf_sbc_used}
 
     # --- Bestandsgroessen: neuestes Quartal ---
     bal_cols = sorted(bal.columns, reverse=True) if bal is not None and not bal.empty else []
@@ -321,6 +357,9 @@ def ttm_to_dict(res: TtmResult) -> dict:
         "quarters": [{**q, **{k: _num_to_json(q.get(k)) for k in _QUARTER_NUM_KEYS}}
                      for q in res.quarters],
         "quarters_currency": res.quarters_currency,
+        # v69: tatsaechlich verwendete Quartale je Flussgroesse (None -> null)
+        "flow_quarters_used": {
+            k: (list(v) if v else None) for k, v in res.flow_quarters_used.items()},
     }
 
 
@@ -353,4 +392,14 @@ def ttm_from_dict(data: Any) -> TtmResult:
                 entry[k] = _num_from_json(q.get(k))
             res.quarters.append(entry)
     res.quarters_currency = str(data.get("quarters_currency") or "")
+    # v69: fehlendes Feld (alte Cache-Eintraege) -> None je Schluessel ->
+    # konservativ "unzuverlaessig" (keine stille Fenster-Annahme)
+    fqu = data.get("flow_quarters_used")
+    fqu = fqu if isinstance(fqu, dict) else {}
+    for key in ("fcf", "fcf_sbc"):
+        v = fqu.get(key)
+        res.flow_quarters_used[key] = (
+            [str(x) for x in v]
+            if isinstance(v, list) and len(v) == 4 and all(isinstance(x, str) and x for x in v)
+            else None)
     return res

@@ -500,10 +500,26 @@ class FXConverter:
 
     def convert_stock(self, value: float, from_cur: str, to_cur: str,
                       as_of: "int | str | _dt.date | None" = None) -> float:
-        """Bestandsgroesse: Wert * Stichtagskurs (<= as_of); NaN bei fehlendem Kurs."""
+        """Bestandsgroesse: Wert * Stichtagskurs (<= as_of); NaN bei fehlendem Kurs.
+
+        v69 (F2-B) Haertung: FEHLT as_of und unterscheiden sich die
+        Waehrungen, wird NaN geliefert (Status 'kein_stichtag') -- ein
+        fehlendes Bilanzdatum darf NIE durch den Tageskurs oder einen
+        beliebigen Jahresendkurs ersetzt werden. Identische Waehrungen
+        benoetigen keinen Kurs (Identity).
+        """
         if value != value:
             return _NAN
-        q = self.quote(from_cur, to_cur, as_of)
+        frm, to = (from_cur or "").upper().strip(), (to_cur or "").upper().strip()
+        if not frm or not to:
+            return _NAN
+        if frm == to:
+            return value
+        if as_of is None or _to_date(as_of) is None:
+            logger.warning("FX convert_stock ohne gueltigen Stichtag "
+                            "(%s->%s): NaN statt Tageskurs-Ersatz", frm, to)
+            return _NAN
+        q = self.quote(frm, to, as_of)
         return value * q.rate if q.ok else _NAN
 
     # ---------------- Aktueller Kurs (Marktwerte) ---------------- #

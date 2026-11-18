@@ -41,7 +41,7 @@ def sanity_mos_flags(mos_v: float, iv_base_v: float, price: float, cfg: dict) ->
     return out
 
 
-def evaluate_ticker(m: TickerMetrics, cfg: dict) -> dict:
+def evaluate_ticker(m: TickerMetrics, cfg: dict, fx=None) -> dict:
     """Wertet einen Ticker aus.
 
     Rueckgabe: {"row": dict | None, "excluded": [gruende], "violations": [texte],
@@ -83,7 +83,7 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict) -> dict:
             logger.warning("%s: SEC-SBC-Fallback fehlgeschlagen: %s", m.ticker, exc)
     out["sbc_sec_sources"] = sbc_sec_sources
 
-    criteria = compute_criteria(m, cfg)
+    criteria = compute_criteria(m, cfg, fx=fx)
     result = score_ticker(criteria, cfg["criteria"], cfg.get("score_groups"))
     out["criteria"] = criteria
     out["score"] = result
@@ -111,7 +111,7 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict) -> dict:
         logger.info("%s: Sektor-Sonderregel (%s) -- DCF/FCF-Yield nicht berechnet",
                     m.ticker, m.industry)
     else:
-        dcf = compute_dcf(m, cfg)
+        dcf = compute_dcf(m, cfg, fx=fx)
     out["dcf"] = dcf
     price = float("nan")
     if (m.market_cap is not None and not m.market_cap.is_na()
@@ -135,7 +135,7 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict) -> dict:
             mos_by_mode[mode] = float("nan")
             vps_by_mode[mode] = float("nan")
         else:
-            dcf_m = compute_dcf(m, cfg, fcf_mode=mode)
+            dcf_m = compute_dcf(m, cfg, fx=fx, fcf_mode=mode)
             mos_by_mode[mode] = dcf_m.margin_of_safety
             _b = dcf_m.scenarios.get("base")
             vps_by_mode[mode] = _b.value_per_share if _b is not None else float("nan")
@@ -157,7 +157,7 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict) -> dict:
             cfg_r = dict(cfg)
             cfg_r["dcf"] = dict(cfg["dcf"])
             cfg_r["dcf"]["discount_rate"] = robust_rate
-            dcf_r = compute_dcf(m, cfg_r, fcf_mode=dcf.fcf_mode
+            dcf_r = compute_dcf(m, cfg_r, fx=fx, fcf_mode=dcf.fcf_mode
                                 if dcf.fcf_mode in ("avg3", "latest", "ttm", "ttm_only") else None)
             mos_robust = dcf_r.margin_of_safety
             _rb = dcf_r.scenarios.get("base")
@@ -207,9 +207,19 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict) -> dict:
         else:
             # Start-FCF <= 0 im aktiven/entscheidenden Modus begruenden
             le0_modes = [mode_names.get(k, k) for k, v in mos_by_mode.items()
-                         if compute_dcf(m, cfg, fcf_mode=k).fcf_le0] if not special else []
+                         if compute_dcf(m, cfg, fx=fx, fcf_mode=k).fcf_le0] if not special else []
             if dcf.fcf_le0:
                 missing.append(f"Start-FCF ≤ 0 im Modus {mode_names.get(dcf.fcf_mode, dcf.fcf_mode)}")
+            elif getattr(dcf, "fcf_fx_status", "") not in ("", "ok") \
+                    and dcf.fcf_normalized == dcf.fcf_normalized:
+                # v69 (F2-B): FCF nicht in Marktkap.-Waehrung konvertierbar
+                # (FX-Kurs oder Periodenfenster) -- Datenqualitaetsproblem.
+                missing.append("FCF nicht konvertierbar (Datenqualität FX) -- DCF n/a")
+            elif getattr(dcf, "shares_current_status", "") not in ("", "ok") and dcf.price_basis == "current":
+                # v69 (F2-B): Aktienbasis bei share_basis=current nicht
+                # bestimmbar (Währung/Einheit ungeklärt) -- keine Kauf-
+                # entscheidung auf unpassender Basis.
+                missing.append("Aktienzahl-Basis unklar (Währung/Einheit) -- DCF n/a (Datenqualität)")
             elif not special and not dcf.net_debt_known and dcf.fcf_normalized == dcf.fcf_normalized:
                 # v66: DCF n/a wegen unbekannter Nettoverschuldung --
                 # Datenqualitaetsproblem, KEINE Aussage ueber die Unternehmensqualitaet
@@ -218,6 +228,15 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict) -> dict:
                             "fx_fehlgeschlagen": "nicht in Marktkap.-Währung konvertierbar"}.get(
                                dcf.net_debt_status, "unbekannt")
                 missing.append(f"Nettoverschuldung {nd_label} -- DCF n/a (Datenqualität)")
+            elif getattr(dcf, "ttm_window_status", "") == "fenster_unzuverlaessig_geskippt":
+                # v69-Fix: TTM-Quelle wegen unzuverlässigem Fenster
+                # übersprungen -- Ø3J-Fallback aktiv, aber MoS n/a
+                missing.append("TTM-Fenster unzuverlässig -- Ø3J-Fallback, MoS n/a (Datenqualität)")
+            elif (dcf.fcf_mode == "ttm_only" and dcf.fcf_normalized != dcf.fcf_normalized
+                  and not special):
+                # v69-Fix: ttm_only ohne verwendbaren TTM-Start -> DCF n/a
+                # (KEIN Ø3J-Rückfall -- Entscheidungstabelle)
+                missing.append("TTM-Start nicht verwendbar (ttm_only) -- DCF n/a")
             elif le0_modes:
                 missing.append(f"Start-FCF ≤ 0 im Modus {', '.join(le0_modes)}")
             else:
@@ -570,6 +589,60 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict) -> dict:
         dq.append("Quartalsdaten unplausibel (Rueckfall GJ)")
     if nd_inconsistent_detail:
         dq.append(nd_inconsistent_detail)
+    # v69 (F2-B): Datenqualitaet FX -- keine stillen n/a-Werte mehr
+    for crit_name, crit_res in (criteria or {}).items():
+        for f in (getattr(crit_res, "dq_flags", None) or []):
+            text = {"fx_nd_fehlgeschlagen":
+                        f"EV/EBIT: ND jährlich nicht FX-konvertierbar ({crit_name})",
+                    "fx_ebit_fehlgeschlagen":
+                        f"EV/EBIT: EBIT jährlich nicht FX-konvertierbar ({crit_name})",
+                    # v69-Fix: fehlende Währung/Stichtag/Fenster eindeutig
+                    # ausweisen (nie generisch "FX-Kurs fehlt")
+                    "fx_nd_waehrung_unbekannt":
+                        f"EV/EBIT: ND-Währung unbekannt ({crit_name}, Datenqualität)",
+                    "fx_nd_stichtag_unbekannt":
+                        f"EV/EBIT: ND-Bilanzstichtag unbekannt ({crit_name}, Datenqualität)",
+                    "fx_ebit_waehrung_unbekannt":
+                        f"EV/EBIT: EBIT-Währung unbekannt ({crit_name}, Datenqualität)",
+                    "fx_ebit_fenster_unzuverlaessig":
+                        f"EV/EBIT: EBIT-FY-Fenster unzuverlässig ({crit_name}, Datenqualität)",
+                    "waehrung_unbekannt":
+                        f"FCF-Yield (SBC): Währung unbekannt ({crit_name}, Datenqualität)",
+                    "fenster_unzuverlaessig":
+                        f"FCF-Yield (SBC): FY-Fenster unzuverlässig ({crit_name}, Datenqualität)",
+                    "fx_fehlgeschlagen":
+                        f"FCF-Yield (SBC): FCF nicht FX-konvertierbar ({crit_name}, Datenqualität)",
+                    }.get(f, f"{crit_name}: FX-Kurs fehlt (Datenqualität)")
+            if text not in dq:
+                dq.append(text)
+    _fx_st = getattr(dcf, "fcf_fx_status", "")
+    if _fx_st not in ("", "ok"):
+        dq.append({"fx_fehlgeschlagen":
+                       "DCF: FCF nicht in Marktkap.-Währung konvertierbar (Datenqualität FX)",
+                   "fenster_unzuverlaessig":
+                       "DCF: TTM-FCF-Quelle periodisch nicht abgrenzbar (Datenqualität)",
+                   "fy_fenster_unzuverlaessig":
+                       "DCF: FY-FCF-Fenster nicht bestimmbar (Datenqualität)",
+                   "quelle_unbekannt":
+                       "DCF: FCF-Quelle nicht zuordenbar/Währung unbekannt (Datenqualität)"}.get(
+                       _fx_st, f"DCF: FCF-FX-Status '{_fx_st}' (Datenqualität)"))
+    # v69-Fix: TTM-Skip IMMER als DQ anzeigen (auch wenn der Ø3J-Fallback
+    # eine gueltige MoS liefert) -- keine stille Ersetzung durch Ø3J.
+    _tw_st = getattr(dcf, "ttm_window_status", "")
+    if _tw_st == "fenster_unzuverlaessig_geskippt":
+        _tw_txt = ("DCF: TTM-Fenster unzuverlässig -- TTM-Quelle übersprungen, "
+                   "Ø3J-Fallback (Datenqualität Periodenabgrenzung)")
+        if _tw_txt not in dq:
+            dq.append(_tw_txt)
+    _sh_st = getattr(dcf, "shares_current_status", "")
+    if _sh_st not in ("", "ok"):
+        dq.append({"waehrung_unbekannt":
+                       "Aktienzahl (Basis current): Währung unbekannt (Datenqualität)",
+                   "einheit_unklar":
+                       "Aktienzahl (Basis current): Kurseinheit unklar (GBp/GBP, Datenqualität)",
+                   "fx_fehlgeschlagen":
+                       "Aktienzahl (Basis current): Kurs nicht FX-konvertierbar (Datenqualität)"}.get(
+                       _sh_st, f"Aktienzahl-Basis: '{_sh_st}' (Datenqualität)"))
     out["data_quality"] = dq
     for d in dq:
         logger.info("%s Datenqualitaet: %s", m.ticker, d)
@@ -637,6 +710,12 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict) -> dict:
         "dcf_net_debt_status": dcf.net_debt_status,
         "dcf_customer_deposits": dcf.customer_deposits,
         "dcf_fcf_mode": dcf.fcf_mode,
+        # v69 (F2-B): FX-/Perioden-Transparenz (Scorecard/CSV-Export)
+        "dcf_fcf_fx_status": getattr(dcf, "fcf_fx_status", ""),
+        "dcf_fcf_window_basis": getattr(dcf, "fcf_window_basis", ""),
+        "dcf_ttm_window_status": getattr(dcf, "ttm_window_status", ""),
+        "dcf_net_debt_fx_asof": getattr(dcf, "net_debt_fx_asof", ""),
+        "shares_current_status": getattr(dcf, "shares_current_status", ""),
         "ttm_plausible": getattr(m, "ttm_plausible", True),
         "dcf_value_per_share_base": dcf.scenarios.get("base").value_per_share
         if dcf.scenarios.get("base") else float("nan"),
@@ -704,7 +783,8 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict) -> dict:
     return out
 
 
-def evaluate_all(companies: list[TickerMetrics], cfg: dict) -> tuple[list[dict], list[dict]]:
+def evaluate_all(companies: list[TickerMetrics], cfg: dict,
+                 fx=None) -> tuple[list[dict], list[dict]]:
     """Wertet alle Ticker aus; gibt (rangliste, ausgeschlossene) zurueck.
 
     Rangliste: Rows sortiert nach Score absteigend (NaN-Scores zuletzt).
@@ -712,7 +792,7 @@ def evaluate_all(companies: list[TickerMetrics], cfg: dict) -> tuple[list[dict],
     """
     rows, excluded = [], []
     for m in companies:
-        res = evaluate_ticker(m, cfg)
+        res = evaluate_ticker(m, cfg, fx=fx)
         if res["row"] is None:
             excluded.append({"ticker": m.ticker, "name": m.name, "reasons": res["excluded"],
                              "history_years": res.get("history_years", 0)})

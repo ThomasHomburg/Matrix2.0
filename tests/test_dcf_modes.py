@@ -61,6 +61,36 @@ def _ticker(fcf_sbc_by_fy=None, mcap: float = 1000.0, shares: float = 10.0,
         m.years[fy] = y
     return m
 
+def _attach_ttm(m, quarter_end="2026-06-30", fcf_sbc=150.0,
+                 net_debt=None, customer_deposits=None, plausible=True):
+    """v69: haengt einen periodisch belastbaren TtmResult an m an
+    (flow_quarters_used + quarters fuer das echte TTM-Fenster)."""
+    quarters, fqu = _ttm_quarters(quarter_end)
+    ttm_metrics = {"fcf_sbc": Metric("fcf_sbc", fcf_sbc, "USD", "USD", 2026)}
+    if net_debt is not None:
+        ttm_metrics["net_debt"] = Metric("net_debt", net_debt, "USD", "USD", 2026)
+    if customer_deposits is not None:
+        ttm_metrics["customer_deposits"] = Metric(
+            "customer_deposits", customer_deposits, "USD", "USD", 2026)
+    m.ttm = TtmResult(ttm=ttm_metrics, quarter_end=quarter_end,
+                      base_label=f"TTM bis {quarter_end[:7]}", plausible=plausible,
+                      fall_back_to_annual=not plausible)
+    m.ttm.quarters = quarters
+    m.ttm.flow_quarters_used = fqu
+    m.ttm_plausible = plausible
+    m.ttm_fallback = not plausible
+    return m
+
+
+def _ttm_quarters(quarter_end: str) -> "tuple[list, dict]":
+    """v69 (F2-B): gueltige 5-Quartals-Historie (absteigend, neueste zuerst)
+    + nachgewiesene verwendete Quartale (die 4 juengsten) fuer das
+    TTM-Fenster. Beispiel quarter_end=2026-06-30: Fenster
+    2025-07-01 .. 2026-06-30 (12 Monate, Vorgaengerquartal 2025-06-30)."""
+    ends = ["2026-06-30", "2026-03-31", "2025-12-31", "2025-09-30", "2025-06-30"]
+    quarters = [{"quarter_end": e} for e in ends]
+    return quarters, {"fcf_sbc": ends[:4], "fcf": ends[:4]}
+
 
 # --- Nettoverschuldung / Equity Value -----------------------------------------
 
@@ -123,18 +153,7 @@ def test_dcf_net_debt_from_ttm_when_basis_ttm():
     """TTM-Basis: Nettoverschuldung aus dem letzten Quartal (Stichtag)."""
     m = _ticker(net_debt=200.0, customer_deposits=10.0)
     m.fiscal_ends = {2025: "2025-12-31", 2024: "2024-12-31", 2023: "2023-12-31"}
-    ttm = TtmResult(
-        ttm={
-            "fcf_sbc": Metric("fcf_sbc", 120.0, "USD", "USD", 2026),
-            "net_debt": Metric("net_debt", 400.0, "USD", "USD", 2026),
-            "customer_deposits": Metric("customer_deposits", 25.0, "USD", "USD", 2026),
-        },
-        quarter_end="2026-06-30", base_label="TTM bis 2026-06",
-        plausible=True,
-    )
-    m.ttm = ttm
-    m.ttm_plausible = True
-    m.ttm_fallback = False
+    _attach_ttm(m, fcf_sbc=120.0, net_debt=400.0, customer_deposits=25.0)
     res = compute_dcf(m, DCF_CFG)
     assert res.fcf_basis == "ttm"
     # Nettoverschuldung aus TTM: 400 + 25 Kundengelder = 425
@@ -165,13 +184,7 @@ def test_fcf_mode_ttm_uses_ttm_when_plausible():
     # TTM endet 2026-06-30 -> Fenster startet 2025-10-01; FY2025 endet
     # 2025-12-31 (ueberlappt) -> verwendet: TTM + FY2024 + FY2023.
     m.fiscal_ends = {2025: "2025-12-31", 2024: "2024-12-31", 2023: "2023-12-31"}
-    ttm = TtmResult(
-        ttm={"fcf_sbc": Metric("fcf_sbc", 150.0, "USD", "USD", 2026)},
-        quarter_end="2026-06-30", plausible=True,
-    )
-    m.ttm = ttm
-    m.ttm_plausible = True
-    m.ttm_fallback = False
+    _attach_ttm(m, fcf_sbc=150.0)
     res = compute_dcf(m, DCF_CFG, fcf_mode="ttm")
     assert res.fcf_basis == "ttm"
     # Ø = (150 + 100 + 80) / 3 (FY2025 ueberlappt das TTM-Fenster!)
@@ -183,13 +196,7 @@ def test_fcf_mode_ttm_uses_ttm_when_plausible():
 def test_fcf_mode_ttm_falls_back_to_avg3_when_unplausible():
     m = _ticker({2023: 80.0, 2024: 100.0, 2025: 110.0})
     m.fiscal_ends = {2025: "2025-12-31", 2024: "2024-12-31", 2023: "2023-12-31"}
-    ttm = TtmResult(
-        ttm={"fcf_sbc": Metric("fcf_sbc", 150.0, "USD", "USD", 2026)},
-        quarter_end="2026-06-30", plausible=False, fall_back_to_annual=True,
-    )
-    m.ttm = ttm
-    m.ttm_plausible = False
-    m.ttm_fallback = True
+    _attach_ttm(m, fcf_sbc=150.0, plausible=False)
     res = compute_dcf(m, DCF_CFG, fcf_mode="ttm")
     assert res.fcf_basis == "annual"
     assert res.fcf_normalized == pytest.approx((80.0 + 100.0 + 110.0) / 3)
@@ -198,13 +205,7 @@ def test_fcf_mode_ttm_falls_back_to_avg3_when_unplausible():
 def test_fcf_mode_auto_prefers_ttm():
     m = _ticker({2023: 80.0, 2024: 100.0, 2025: 110.0})
     m.fiscal_ends = {2025: "2025-12-31", 2024: "2024-12-31", 2023: "2023-12-31"}
-    ttm = TtmResult(
-        ttm={"fcf_sbc": Metric("fcf_sbc", 150.0, "USD", "USD", 2026)},
-        quarter_end="2026-06-30", plausible=True,
-    )
-    m.ttm = ttm
-    m.ttm_plausible = True
-    m.ttm_fallback = False
+    _attach_ttm(m, fcf_sbc=150.0)
     res = compute_dcf(m, DCF_CFG)  # Default: auto
     assert res.fcf_basis == "ttm"
     assert res.fcf_mode == "auto"

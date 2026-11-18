@@ -12,12 +12,13 @@ Historienfenster: 5 Jahre (config: data.years). CAGR ueber 5 Punkte
 
 from __future__ import annotations
 
+import datetime as _dt
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from data.loader import TickerMetrics
-from data.metrics import fcf_yield_sbc, roic, roe
+from data.metrics import fcf_yield_sbc, fy_flow_window, roic, roe
 from scoring.sectors import sector_rule, normalized_net_income, price_to_book, dividend_yield
 
 
@@ -28,6 +29,11 @@ class CriterionResult:
     years_available: int = 0
     thin: bool = False
     years_total: int = 0  # Fensterlaenge (Basis der Kennzahl), z. B. "4 / 4" bei fcf_positive_years
+    # v69 (F2-B): Datenqualitaets-Flags (kein Score-Problem, sondern fehlende
+    # FX-Kurse/Periodenfenster): z. B. "fx_nd_fehlgeschlagen", "fx_ebit_fehlgeschlagen",
+    # "fx_fehlgeschlagen" (FCF-Yield). Wird von der Pipeline als dq_reason
+    # transparent weitergegeben -- NaN allein waere still.
+    dq_flags: list[str] = field(default_factory=list)
 
 
 Calc = Callable[[TickerMetrics, dict, Any], CriterionResult]
@@ -298,13 +304,40 @@ def calc_fcf_yield_sbc_avg3(m: TickerMetrics, cfg, fx) -> CriterionResult:
         return calc_ffo_yield(m, cfg, fx)
     fcf = _values(m, "fcf_sbc")
     yields = []
+    dq: list[str] = []
+
+    def _dq_add(flag: str) -> None:
+        if flag not in dq:
+            dq.append(flag)
+
     for fy, v in fcf[-3:]:
         y = fcf_yield_sbc(m, fy, fx=fx)
         if y == y:
             yields.append(y)
-    if len(yields) < cfg["min_points_3y"]:
-        return _result(float("nan"), True, years, thin)
-    return _result(_avg(yields), False, years, thin)
+            continue
+        # v69-Fix: Flags nur bei vorhandenen UND verwendbaren Werten --
+        # ein NaN-Yield wegen unbrauchbarer Marktkapitalisierung (NaN/<=0)
+        # oder fehlendem FCF ist KEIN FX-Fehler.
+        met = m.years.get(fy, {}).get("fcf_sbc")
+        if (met is None or met.is_na()
+                or m.market_cap is None or m.market_cap.is_na()
+                or not m.market_cap.value > 0):
+            continue
+        # v69-Fix: Ursachen eindeutig trennen (waehrung/fenster/kurs)
+        cu = (met.currency or "").upper()
+        mc_cur = (m.market_cap.currency or "").upper()
+        if not cu or not mc_cur:
+            _dq_add("waehrung_unbekannt")
+        elif cu != mc_cur:
+            d0, d1 = fy_flow_window(m, fy)
+            if d0 is None:
+                _dq_add("fenster_unzuverlaessig")
+            else:
+                _dq_add("fx_fehlgeschlagen")
+    res = _result(_avg(yields) if yields else float("nan"),
+                  len(yields) < cfg["min_points_3y"], years, thin)
+    res.dq_flags = dq
+    return res
 
 
 def calc_mos_base(m: TickerMetrics, cfg, fx) -> CriterionResult:
@@ -390,31 +423,86 @@ def calc_ev_ebit_vs_hist_ebit(m: TickerMetrics, cfg, fx) -> CriterionResult:
     """
     thin = cfg["thin_years"]
     years = _year_count(m, "ebit", "net_debt")
-    if m.market_cap is None or m.market_cap.is_na():
+    if m.market_cap is None or m.market_cap.is_na() or not m.market_cap.value > 0:
         return _result(float("nan"), True, years, thin)
     ratios = []
+    dq: list[str] = []
+
+    def _dq_add(flag: str) -> None:
+        if flag not in dq:
+            dq.append(flag)
+
+    mcap_cur = (m.market_cap.currency or "").upper()
     for fy in sorted(m.years, reverse=True):
         ebit = m.years[fy].get("ebit")
         nd = m.years[fy].get("net_debt")
         if ebit is None or nd is None or ebit.is_na() or nd.is_na() or ebit.value <= 0:
             continue
-        nd_conv = nd.value if nd.currency == m.market_cap.currency else (
-            fx.convert(nd.value, nd.currency, m.market_cap.currency, fy) if fx else float("nan")
-        )
+        # v69 (F2-B)/v69-Fix: EV und EBIT muessen vor der Division in
+        # derselben Waehrung stehen; Ursachen EINDEUTIG trennen
+        # (waehrung/stichtag/fenster/kurs), je Konvertierungsstelle genau
+        # EINE Ursache, dedupliziert. ND ist Bestandsgroesse ->
+        # Stichtagskurs zum FY-Ende (convert_stock); EBIT ist Stromgroesse
+        # -> Perioden-O ueber das echte FY-Fenster (convert_flow).
+        # v65-Semantik (aktuelles EV / historisches EBIT vs. Median)
+        # UNVERAENDERT.
+        fy_end = (m.fiscal_ends.get(fy) or "")[:10]
+        nd_cur = (nd.currency or "").upper()
+        if nd_cur and mcap_cur and nd_cur == mcap_cur:
+            nd_conv = nd.value
+        elif not nd_cur or not mcap_cur:
+            _dq_add("fx_nd_waehrung_unbekannt")
+            nd_conv = float("nan")
+        elif not fy_end:
+            _dq_add("fx_nd_stichtag_unbekannt")
+            nd_conv = float("nan")
+        else:
+            nd_conv = (fx.convert_stock(nd.value, nd_cur, m.market_cap.currency, fy_end)
+                       if fx is not None else float("nan"))
+            if nd_conv != nd_conv:
+                _dq_add("fx_nd_fehlgeschlagen")
         if nd_conv != nd_conv:
             continue
+        eb_cur = (ebit.currency or "").upper()
+        if eb_cur and mcap_cur and eb_cur == mcap_cur:
+            ebit_conv = ebit.value
+        elif not eb_cur or not mcap_cur:
+            _dq_add("fx_ebit_waehrung_unbekannt")
+            ebit_conv = float("nan")
+        else:
+            d0, d1 = fy_flow_window(m, fy)
+            if d0 is None:
+                # v69-Fix: NUR bei bekannten unterschiedlichen Waehrungen,
+                # deren Konvertierung allein am FY-Fenster scheitert
+                _dq_add("fx_ebit_fenster_unzuverlaessig")
+                ebit_conv = float("nan")
+            elif fx is not None:
+                ebit_conv = fx.convert_flow(ebit.value, eb_cur,
+                                            m.market_cap.currency, d0, d1)
+                if ebit_conv != ebit_conv:
+                    _dq_add("fx_ebit_fehlgeschlagen")
+            else:
+                _dq_add("fx_ebit_fehlgeschlagen")
+                ebit_conv = float("nan")
+        if ebit_conv != ebit_conv or ebit_conv <= 0:
+            continue
         ev = m.market_cap.value + nd_conv
-        ratios.append((fy, ev / ebit.value))
+        ratios.append((fy, ev / ebit_conv))
     if len(ratios) < cfg["min_points_5y"]:
-        return _result(float("nan"), True, years, thin)
+        res = _result(float("nan"), True, years, thin)
+        res.dq_flags = dq
+        return res
     current_fy = max(fy for fy, _ in ratios)
     current = next(r for fy, r in ratios if fy == current_fy)
     median_vals = sorted(r for _, r in ratios)
     mid = len(median_vals) // 2
     median = median_vals[mid] if len(median_vals) % 2 else (median_vals[mid - 1] + median_vals[mid]) / 2
     if median <= 0:
-        return _result(float("nan"), True, years, thin)
-    return _result(current / median, False, years, thin)
+        res = _result(float("nan"), True, years, thin)
+    else:
+        res = _result(current / median, False, years, thin)
+    res.dq_flags = dq
+    return res
 
 
 # --- v28: Sektor-Kriterien (Banken/Versicherer: ROE, P/B, Dividendenrendite;

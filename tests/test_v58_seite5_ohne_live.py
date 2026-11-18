@@ -51,7 +51,7 @@ def _page_script(tmp_path, db, body):
 def _counting_mocks(monkeypatch):
     calls = {"evaluate": 0, "load_live": 0}
 
-    def fake_evaluate(companies, cfg):
+    def fake_evaluate(companies, cfg, fx=None):   # v69: fx-Parameter (ignored)
         calls["evaluate"] += 1
         return [], []
 

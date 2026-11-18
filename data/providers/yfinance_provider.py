@@ -165,6 +165,25 @@ class YfinanceProvider:
                                        int(financials.columns[0].year))
             from datetime import date
             result.market_cap_date = date.today().isoformat()  # Stichtag: Abrufdatum
+        # v69 (F2-B): Einheiten-Zustand des Kurses (GBp/GBX-Thematik).
+        # yfinance liefert Pence-Notierungen als currency="GBp": Kurs faktisch
+        # in Pence, waehrend marketCap in GBP-Majors liegt (Faktor 100; live
+        # verifiziert in der Audit-4-Analyse). trading_cur ist bereits
+        # upper()-normalisiert ("GBp" -> "GBP") -- deshalb wird der ROHE
+        # String ausgewertet. Zustand nur eindeutig klassifizieren:
+        #   - roh_gb_pence: GBp/GBX -> shares_current-Gate sperrt bis zur
+        #     zentralen Normalisierung (nicht Teil dieses Schritts)
+        #   - unbekannt: "GBP"-Label ohne Normalisierungsnachweis
+        #   - normalisiert: alle anderen eindeutigen Handelswaehrungen
+        # NIEMALS allein aus dem String "GBP" auf Pence schliessen -- nur
+        # dieses explizite Zustandsfeld ist fuer das Gate verbindlich.
+        _cur_raw = str(info.get("currency") or "")
+        if _cur_raw.upper() in ("GBP", "GBX") and _cur_raw != "GBP":
+            result.fx_unit_state = "roh_gb_pence"
+        elif _cur_raw.upper() == "GBP":
+            result.fx_unit_state = "unbekannt"
+        else:
+            result.fx_unit_state = "normalisiert"
         # v62: Boersen-Schlusskurs (kurs_boerse) aus dem Quote
         pr = info.get("regularMarketPrice") or info.get("currentPrice")
         if pr is not None:

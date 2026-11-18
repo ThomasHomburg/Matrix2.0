@@ -37,6 +37,7 @@ from data.metrics import fcf_yield, fcf_yield_sbc
 from data.providers.base import ProviderError, build_providers, load_with_provider
 from data.loader import country_code, TickerMetrics
 from data.tickerlist import load_ticker_file
+from data.fx import build_fx
 from scoring.pipeline import evaluate_all, rank_rows
 
 logging.basicConfig(
@@ -283,7 +284,10 @@ def main() -> None:
         logger.info("Kein Live-Ticker geladen -- verwende Demo-Daten.")
         companies = demo_companies()
 
-    rows, excluded = evaluate_all(companies, cfg)
+    # v69 (F2-B): EIN zentraler FXConverter je Lauf (manuelle Kurse +
+    # SQLite-Cache auch ohne API-Key nutzbar, FMP-Abruf nur mit Key).
+    fx = build_fx(cfg, api_key=api_key)
+    rows, excluded = evaluate_all(companies, cfg, fx=fx)
     if args.tickers or args.out:
         if args.out:
             out_path = args.out

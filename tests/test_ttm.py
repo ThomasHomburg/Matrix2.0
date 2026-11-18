@@ -203,6 +203,14 @@ def _ticker_with_ttm(fy_fcf_sbc: dict[int, float], ttm_fcf_sbc: float,
         quarter_end=ttm_end, base_label=f"TTM bis {ttm_end[:7]}",
         plausible=True,
     )
+    # v69 (F2-B): belastbarer Periodennachweis -- 4 verwendete Quartale +
+    # unmittelbares Vorgaengerquartal (lueckenlose 91-Tage-Kadenz, das
+    # echte 12-Monats-Fenster ist damit ableitbar).
+    import datetime as _dt
+    _e0 = _dt.date.fromisoformat(ttm_end)
+    _ends = [(_e0 - _dt.timedelta(days=91 * i)).isoformat() for i in range(4, -1, -1)]
+    ttm.quarters = [{"quarter_end": e} for e in _ends]
+    ttm.flow_quarters_used = {"fcf_sbc": _ends[1:], "fcf": _ends[1:]}
     m.ttm = ttm
     m.ttm_plausible = True
     m.ttm_fallback = False
