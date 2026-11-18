@@ -208,7 +208,119 @@ def test_compute_ttm_currency_fallback_unchanged():
     assert res2.ttm["revenue"].currency == "USD"
 
 
-# ---------- (7) _NoFX: leere Waehrung ist keine valide Waehrung ----------
+# ---------- (7) compute_ttm: Schluessel-Praesenz statt Wahrheitswert ----------
+# Ist quarterly['currency'] vorhanden (auch ""), wird der Wert verwendet;
+# nur bei fehlendem Schluessel greift der Legacy-Rueckfall; ohne Marktkap.-
+# Waehrung bleibt "" -- KEIN USD-Fallback.
+
+def _ttm_frames(currency=None):
+    """Quartals-Frames fuer compute_ttm; currency=None -> Schluessel fehlt."""
+    from data.loader import Metric, TickerMetrics
+    m = TickerMetrics(ticker="T")
+    qcols = [pd.Timestamp("2026-08-31"), pd.Timestamp("2026-05-31"),
+             pd.Timestamp("2026-02-28"), pd.Timestamp("2025-11-30")]
+    frames = {"income": _frames(qcols, {"Total Revenue": [25.0] * 4}),
+              "balance": _frames(qcols, {"Stockholders Equity": [50.0] * 4}),
+              "cashflow": _frames(qcols, {
+                  "Operating Cash Flow": [30.0] * 4,
+                  "Capital Expenditure": [-10.0] * 4,
+                  "Free Cash Flow": [20.0] * 4,
+                  "Stock Based Compensation": [5.0] * 4}),
+              "row_map": {"revenue": ["Total Revenue"],
+                          "operating_cashflow": ["Operating Cash Flow"],
+                          "capex": ["Capital Expenditure"],
+                          "fcf": ["Free Cash Flow"],
+                          "stock_based_compensation": ["Stock Based Compensation"]}}
+    if currency is not None:
+        frames["currency"] = currency
+    return m, frames
+
+
+def _mcap(cur):
+    from data.loader import Metric, TickerMetrics
+    m = TickerMetrics(ticker="T")
+    if cur is not None:
+        m.market_cap = Metric("market_cap", 1000.0, cur, cur, 2025)
+    return m
+
+
+def test_ttm_currency_empty_string_stays_empty():
+    """(1) currency='' bei Marktkap. EUR: TTM-Waehrung bleibt ''
+    (unbekannt), kein Rueckfall auf EUR; Metriken ebenfalls ''."""
+    from data.ttm import compute_ttm
+    m, frames = _ttm_frames(currency="")
+    m.market_cap = _mcap("EUR").market_cap
+    res = compute_ttm(m, frames)
+    assert res.quarters_currency == ""
+    assert res.ttm["revenue"].currency == ""
+    assert res.ttm["fcf_sbc"].currency == ""
+
+
+def test_ttm_currency_empty_string_without_mcap():
+    """(2) currency='' ohne Marktkap.: TTM-Waehrung bleibt '' -- kein USD."""
+    from data.ttm import compute_ttm
+    m, frames = _ttm_frames(currency="")
+    res = compute_ttm(m, frames)
+    assert res.quarters_currency == ""
+    assert res.ttm["revenue"].currency == ""
+
+
+def test_ttm_currency_key_missing_legacy_fallback():
+    """(3) Schluessel fehlt, Marktkap. EUR -> Legacy-Rueckfall EUR."""
+    from data.ttm import compute_ttm
+    m, frames = _ttm_frames(currency=None)
+    m.market_cap = _mcap("EUR").market_cap
+    res = compute_ttm(m, frames)
+    assert res.quarters_currency == "EUR"
+    assert res.ttm["revenue"].currency == "EUR"
+
+
+def test_ttm_currency_key_missing_no_mcap_no_usd():
+    """(4) Schluessel fehlt und Marktkap. fehlt -> TTM-Waehrung bleibt ''
+    (KEIN USD-Fallback)."""
+    from data.ttm import compute_ttm
+    m, frames = _ttm_frames(currency=None)
+    res = compute_ttm(m, frames)
+    assert res.quarters_currency == ""
+    assert res.ttm["revenue"].currency == ""
+
+
+def test_ttm_currency_none_becomes_empty():
+    """quarterly['currency'] = None (Schluessel vorhanden, Wert None):
+    Waehrung wird "" (unbekannt), nicht None weitergereicht und NICHT durch
+    die Marktkap.-Waehrung ersetzt."""
+    from data.ttm import compute_ttm
+    m, frames = _ttm_frames(currency=None)
+    frames["currency"] = None          # Schluessel explizit mit None
+    m.market_cap = _mcap("EUR").market_cap
+    res = compute_ttm(m, frames)
+    assert res.quarters_currency == ""           # nicht None, nicht EUR
+    assert res.ttm["revenue"].currency == ""
+    assert res.ttm["fcf_sbc"].currency == ""
+
+
+def test_ttm_currency_none_without_mcap():
+    """currency=None ohne Marktkap.: "" -- kein USD, kein None."""
+    from data.ttm import compute_ttm
+    m, frames = _ttm_frames(currency=None)
+    frames["currency"] = None
+    res = compute_ttm(m, frames)
+    assert res.quarters_currency == ""
+    assert res.ttm["revenue"].currency == ""
+
+
+def test_ttm_currency_explicit_usd():
+    """(5) Explizites USD -> TTM-Waehrung und Metriken USD."""
+    from data.ttm import compute_ttm
+    m, frames = _ttm_frames(currency="USD")
+    m.market_cap = _mcap("EUR").market_cap
+    res = compute_ttm(m, frames)
+    assert res.quarters_currency == "USD"
+    assert res.ttm["revenue"].currency == "USD"
+    assert res.ttm["fcf_sbc"].currency == "USD"
+
+
+# ---------- (8) _NoFX: leere Waehrung ist keine valide Waehrung ----------
 
 def test_nofx_empty_currency_is_nan():
     conv = _NoFX()

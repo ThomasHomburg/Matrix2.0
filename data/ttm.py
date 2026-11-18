@@ -122,18 +122,25 @@ def compute_ttm(m: TickerMetrics, quarterly: dict) -> TtmResult:
     # v68 (Audit F1): TTM-Werte stammen aus den Quartals-Statements und
     # liegen damit in der BERICHTSwaehrung -- nicht in der Quote-/Marktkap.-
     # Waehrung. Der yfinance-Provider uebergibt sie als quarterly['currency']
-    # (einziger produktiver Aufrufer). Ohne Angabe Rueckfall auf die
-    # Marktkap.-Waehrung (altes Verhalten, Abwaertskompatibilitaet fuer
-    # Direktaufrufe) -- mit Warnung, da das bei abweichenden Waehrungen
-    # ein Mislabeling waere.
-    currency = quarterly.get("currency")
-    if not currency:
+    # (einziger produktiver Aufrufer).
+    # Ist der Schluessel vorhanden, wird sein Wert VERWENDET -- auch "" (
+    # unbekannt): eine unbekannte Berichtswaehrung darf nicht still als
+    # Handels-/Marktkap.-Waehrung gelabelt werden. Nur wenn der Schluessel
+    # komplett fehlt, greift der Legacy-Rueckfall auf die Marktkap.-Waehrung
+    # (Abwaertskompatibilitaet fuer Direktaufrufe, mit Warnung). Fehlt auch
+    # die, bleibt die Waehrung "" -- KEIN USD-Fallback, keine Unterstellung.
+    if "currency" in quarterly:
+        # None ist keine Waehrungskennzeichnung -> "" (unbekannt); der Wert
+        # wird nicht als None weitergereicht und NICHT durch die Marktkap.-
+        # Waehrung ersetzt.
+        currency = quarterly["currency"] or ""
+    else:
         import logging
         logging.getLogger("value_screener.ttm").warning(
             "compute_ttm ohne quarterly['currency'] -- TTM-Waehrung wird aus "
             "der Marktkap.-Waehrung abgeleitet (Rueckfall; bei abweichender "
             "Berichtswaehrung unzulaessig)")
-        currency = m.market_cap.currency if m.market_cap else "USD"
+        currency = m.market_cap.currency if m.market_cap else ""
     res.quarters_currency = currency
     fy_ttm = last_q.year
 
