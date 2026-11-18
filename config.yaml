@@ -528,3 +528,23 @@ universe:
   batch_pause_seconds: 2.0   ## Pause zwischen Batches (yfinance-Rate-Limit)
   resume: true               ## Wiederaufnahme nach Abbruch (Cache-Datei)
   cache_file: ".universe_cache.json" ## Fortschritt je Ticker (OK/Fehler)
+
+# v69 (F2 Schritt A): FX-Konvertierung (data/fx.py). Pfade und Grenzwerte --
+# keine fachlichen Schalter. Schwellen siehe Modul-Docstring:
+#   min_flow_coverage:        Mindestabdeckung n_closes/Werktage fuer den
+#                             Periodendurchschnitt von Stromgroessen
+#   max_flow_gap_days:        max. zusammenhaengende Kalenderluecke im
+#                             Kursfenster (inkl. Fensterraender)
+#   naeherung_stichtag_tol_days: Toleranz, innerhalb derer ein Fensterende
+#                             als "praktisch Jahresende" gilt und ein
+#                             Jahresendkurs als NAEHERUNG zulaessig ist
+#   current_max_age_days:     max. Alter (Kalendertage) eines als "aktuell"
+#                             verwendeten Kurses (Marktwerte/shares_current)
+fx:
+  cache_file: "fx_rates.db"
+  manual_path: "fx_rates.yaml"
+  api_timeout_s: 10.0
+  min_flow_coverage: 0.80
+  max_flow_gap_days: 10
+  naeherung_stichtag_tol_days: 14
+  current_max_age_days: 5
