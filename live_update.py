@@ -513,6 +513,41 @@ def migrate_share_basis(con: sqlite3.Connection, cfg: dict, rows_by_t: dict) -> 
     return n
 
 
+
+def migrate_fcff_fix(con: sqlite3.Connection, cfg: dict) -> int:
+    """v70 Altbestand FCFF-Fix: Alt-Zeilen in valuations/decisions, die VOR
+    dem Methodenwechsel (levered FCF, Modell v62-v69) berechnet wurden, werden
+    nur MARKIERT (flags-Spalte 'fcff_vor_v70'), nichts geloescht oder neu
+    gerechnet. valuations: calc_date < fcff_fix.datum; decisions: datum <
+    fcff_fix.datum. decisions-Korb-Zeilen am Snapshot-Datum erhalten
+    zusaetzlich den hinweis (analog v62 Share-Basis-Fix); auch dort wird
+    nichts geloescht. Grund: iv/MoS sind mit Modell v70 (unlevered)
+    nicht vergleichbar."""
+    fix = cfg.get("decisions", {}).get("fcff_fix", {}) or {}
+    fix_datum = str(fix.get("datum", "2026-11-19"))
+    hinweis = str(fix.get("hinweis",
+                          "FCFF-Fix: iv/MoS basieren auf levered FCF "
+                          "(Modell v62-v69), nicht mit v70 vergleichbar"))
+    marker = "fcff_vor_v70"
+    n = 0
+    for table, date_col in (("valuations", "calc_date"), ("decisions", "datum")):
+        cols = {x[1] for x in con.execute(f"PRAGMA table_info({table})")}
+        if not {date_col, "flags"} <= cols:
+            continue
+        n += con.execute(
+            f"UPDATE {table} SET flags=CASE WHEN flags LIKE ? THEN flags "
+            f"ELSE trim(coalesce(flags, '') || ' ' || ?) END "
+            f"WHERE {date_col} IS NOT NULL AND {date_col} < ?",
+            (f"%{marker}%", marker, fix_datum)).rowcount
+        if table == "decisions" and "hinweis" in cols:
+            con.execute(
+                "UPDATE decisions SET hinweis=? WHERE datum=? AND korb<>'' "
+                "AND (hinweis IS NULL OR hinweis='')",
+                (hinweis, fix_datum))
+    con.commit()
+    return n
+
+
 def store_live_status(con: sqlite3.Connection, out_rows: list[dict],
                       prices: dict[str, dict]) -> None:
     """v53: Live-Stand in value_tracker.db persistieren (Seite 5 Watchlist Live
@@ -637,6 +672,10 @@ def main() -> None:
     n_fix = migrate_share_basis(con, cfg, rows_by_t)
     if n_fix:
         logger.info("Aktienbasis-Fix: %d Alt-Zeilen umgerechnet (iv_aktuell, Flag umgerechnet)", n_fix)
+    # v70 Altbestand: Vor-v70-Zeilen nur markieren (fcff_vor_v70), nichts loeschen
+    n_fcff = migrate_fcff_fix(con, cfg)
+    if n_fcff:
+        logger.info("FCFF-Fix: %d Alt-Zeilen markiert (%s)", n_fcff, "fcff_vor_v70")
     con.close()
     write_watchlist_csv(out_rows, args.out)
     print_table(out_rows)

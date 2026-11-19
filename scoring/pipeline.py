@@ -237,6 +237,11 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict, fx=None) -> dict:
                 # v69-Fix: ttm_only ohne verwendbaren TTM-Start -> DCF n/a
                 # (KEIN Ø3J-Rückfall -- Entscheidungstabelle)
                 missing.append("TTM-Start nicht verwendbar (ttm_only) -- DCF n/a")
+            elif getattr(dcf, "fcff_status", "") == "zinsaufwand_fehlend":
+                # v70: FCFF-Basis benoetigt den Zinsaufwand je Quelle --
+                # fehlender Zinsaufwand ist ein Datenqualitaetsproblem,
+                # KEIN stiller Rueckfall auf levered Werte.
+                missing.append("Zinsaufwand fehlt (FCFF) -- DCF n/a (Datenqualität)")
             elif le0_modes:
                 missing.append(f"Start-FCF ≤ 0 im Modus {', '.join(le0_modes)}")
             else:
@@ -545,6 +550,11 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict, fx=None) -> dict:
         flag_parts.append(f)
         logger.warning("%s: %s (MoS=%.6g, iv_base=%.6g, kurs=%.6g)", m.ticker, f, mos_v, iv_base_v, price)
 
+    # v70: IFRS-Schutz -- Ticker mit Boersen-Suffix bleiben auf levered
+    # (kein FCFF-Aufschlag; IAS 7 erlaubt Zinszahlungen im Finanzierungs-CF)
+    _fb_flag = str(getattr(dcf, "fcf_basis_flag", "") or "")
+    if _fb_flag == "legacy_nonUS":
+        flag_parts.append("fcf_basis:legacy_nonUS")
     flags = " ".join(dict.fromkeys(flag_parts))  # entdoppeln, Reihenfolge behalten
 
     # Datenqualitaet je Ticker (fuer testlauf_fehler.txt):
@@ -634,6 +644,10 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict, fx=None) -> dict:
                    "Ø3J-Fallback (Datenqualität Periodenabgrenzung)")
         if _tw_txt not in dq:
             dq.append(_tw_txt)
+    # v70: FCFF-Transparenz
+    _fcff_st = getattr(dcf, "fcff_status", "")
+    if _fcff_st == "zinsaufwand_fehlend":
+        dq.append("DCF: Zinsaufwand fehlt (FCFF-Basis) -- DCF n/a (Datenqualität)")
     _sh_st = getattr(dcf, "shares_current_status", "")
     if _sh_st not in ("", "ok"):
         dq.append({"waehrung_unbekannt":
@@ -714,6 +728,10 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict, fx=None) -> dict:
         "dcf_fcf_fx_status": getattr(dcf, "fcf_fx_status", ""),
         "dcf_fcf_window_basis": getattr(dcf, "fcf_window_basis", ""),
         "dcf_ttm_window_status": getattr(dcf, "ttm_window_status", ""),
+        "dcf_fcf_basis_flag": getattr(dcf, "fcf_basis_flag", ""),
+        "dcf_fcff_status": getattr(dcf, "fcff_status", ""),
+        "dcf_fcff_interest_added": getattr(dcf, "fcff_interest_added", float("nan")),
+        "dcf_fcff_steuersatz_normiert": getattr(dcf, "fcff_steuersatz_normiert", False),
         "dcf_net_debt_fx_asof": getattr(dcf, "net_debt_fx_asof", ""),
         "shares_current_status": getattr(dcf, "shares_current_status", ""),
         "ttm_plausible": getattr(m, "ttm_plausible", True),

@@ -43,6 +43,7 @@ def _ticker(fcf_sbc: float = 100.0, mcap: float = 1000.0, shares: float = 10.0,
     for i, fy in enumerate((2023, 2024, 2025)):
         m.years[fy] = {
             "fcf_sbc": Metric("fcf_sbc", fcf_sbc, "USD", "USD", fy),
+            "interest_expense": Metric("interest_expense", 0.0, "USD", "USD", fy),  # v70: 0 = gueltig
             "revenue": Metric("revenue", 1000.0 * (1 + cagr) ** i, "USD", "USD", fy),
             "shares_diluted": Metric("shares_diluted", shares, "shares", "USD", fy),
             "net_debt": Metric("net_debt", 0.0, "USD", "USD", fy),
@@ -133,8 +134,19 @@ def test_pipeline_row_mit_mos_und_buy_flag(aapl_metrics, cfg):
     assert row is not None
     assert "margin_of_safety" in row
     assert "is_buy" in row
-    assert res["dcf"].fcf_normalized == pytest.approx(
-        (87.079e9 + 97.855e9 + 88.751e9) / 3, rel=1e-3)  # Ø FCF-SBC 2023-2025
+    # v70 (FCFF): Start-FCF je FY + |Zinsaufwand| x (1 - Steuersatz); AAPL hat
+    # reale Zinsdaten (Demo-FIXTURE schuldentragend) -> handgerechnet neu:
+    #   FY2023: 88.751 + 2.980 x (1 - 16741/113736)
+    #   FY2024: 97.855 + 2.980 x (1 - 29749/123485)
+    #   FY2025: 87.079 + 3.000 x (1 - 20719/132729)
+    exp_fcff = (
+        (88.751e9 + 2.980e9 * (1 - 16741 / 113736))
+        + (97.855e9 + 2.980e9 * (1 - 29749 / 123485))
+        + (87.079e9 + 3.000e9 * (1 - 20719 / 132729))
+    ) / 3
+    assert res["dcf"].fcf_normalized == pytest.approx(exp_fcff, rel=1e-3)
+    assert res["dcf"].fcf_basis_flag == "fcff"
+    assert res["dcf"].fcff_status == "ok"
     # Flags sind entdoppelt
     flags = row["flags"].split()
     assert len(flags) == len(set(flags))

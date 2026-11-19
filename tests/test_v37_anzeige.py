@@ -35,6 +35,7 @@ def _mk(cagr: float, fcf: float) -> TickerMetrics:
             "revenue": Metric("revenue", rev, "USD", "USD", fy),
             "fcf": Metric("fcf", fcf, "USD", "USD", fy),
             "fcf_sbc": Metric("fcf_sbc", fcf, "USD", "USD", fy),
+            "interest_expense": Metric("interest_expense", 0.0, "USD", "USD", fy),  # v70: 0 = gueltig
             "shares_diluted": Metric("shares_diluted", 2e9, "shares", "USD", fy),
             "net_debt": Metric("net_debt", 0.0, "USD", "USD", fy),
         }

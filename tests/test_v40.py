@@ -49,6 +49,7 @@ def _mk(cagr: float, fcf: float, net_debt: float = -10e9, mcap: float = 100e9) -
             "fcf_sbc": Metric("fcf_sbc", fcf, "USD", "USD", fy),
             "shares_diluted": Metric("shares_diluted", 2e9, "shares", "USD", fy),
             "net_debt": Metric("net_debt", net_debt, "USD", "USD", fy),
+            "interest_expense": Metric("interest_expense", 0.0, "USD", "USD", fy),  # v70: 0 = gueltig (FCFF == FCF)
         }
         m.fiscal_ends[fy] = f"{fy}-12-31"
     return m

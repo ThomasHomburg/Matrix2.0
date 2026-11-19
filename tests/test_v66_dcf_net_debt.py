@@ -51,6 +51,7 @@ def _ticker(net_debt=..., total_debt=..., cash=..., mcap_cur="USD",
     for i, fy in enumerate((2023, 2024, 2025)):
         y = {
             "fcf_sbc": Metric("fcf_sbc", 100.0, "USD", "USD", fy),
+            "interest_expense": Metric("interest_expense", 0.0, "USD", "USD", fy),  # v70: 0 = gueltig
             "revenue": Metric("revenue", 1000.0 * 1.05 ** i, "USD", "USD", fy),
             "shares_diluted": Metric("shares_diluted", 10.0, "shares", "USD", fy),
         }

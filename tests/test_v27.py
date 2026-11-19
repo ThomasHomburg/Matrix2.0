@@ -38,6 +38,7 @@ def _ticker_with_ttm(fcf_fy: float = 100.0, fcf_q: float = 30.0,
         rev *= 1.05
         m.years[fy] = {
             "fcf_sbc": Metric("fcf_sbc", fcf_fy, "USD", "USD", fy),
+            "interest_expense": Metric("interest_expense", 0.0, "USD", "USD", fy),  # v70: 0 = gueltig
             "revenue": Metric("revenue", rev, "USD", "USD", fy),
             "shares_diluted": Metric("shares_diluted", shares, "shares", "USD", fy),
             "net_debt": Metric("net_debt", 0.0, "USD", "USD", fy),  # bekannt 0 (v66)
@@ -53,10 +54,13 @@ def _ticker_with_ttm(fcf_fy: float = 100.0, fcf_q: float = 30.0,
         "Free Cash Flow": [fcf_q] * 5,
         "Stock Based Compensation": [sbc_q] * 5,
     }, index=quarters).T
-    inc = pd.DataFrame({"Total Revenue": [100.0] * 5}, index=quarters).T
+    # v70: Zinsaufwand 0.0 (gueltiger Wert) -- sonst ist die FCFF-Basis n/a
+    inc = pd.DataFrame({"Total Revenue": [100.0] * 5,
+                        "Interest Expense": [0.0] * 5}, index=quarters).T
     bal = pd.DataFrame({"Net Debt": [0.0] * 5, "Stockholders Equity": [100.0] * 5},
                        index=quarters).T
     row_map = {"revenue": ["Total Revenue"],
+               "interest_expense": ["Interest Expense"],   # v70 (FCFF)
                "operating_cashflow": ["Operating Cash Flow"],
                "capex": ["Capital Expenditure"], "fcf": ["Free Cash Flow"],
                "stock_based_compensation": ["Stock Based Compensation"],
@@ -199,6 +203,14 @@ def test_status_beobachtung_wenn_min_unter_30_aber_bestes_ok(cfg):
     from scoring.pipeline import evaluate_ticker
     cfg_off = dict(cfg)
     cfg_off["sec"] = {"enabled": False}
+    # v70 (FCFF, D2 handgerechnet): Der Zinsaufschlag (ie = 1 % vom Umsatz,
+    # Steuersatz 20 % -> +0.8 % x Umsatz je Quelle) hebt mos_rule von 0.30 auf
+    # ~0.33 -- die Fixture WAERE jetzt ein Kandidat (Quality 87.7, Bear-
+    # Floor erfuellt). Damit der Test seinen Zweck behaelt (Statusregel
+    # 'Beobachtung nur wenn Min >= 30 %, aber kein Kandidat'), liegt die
+    # KAUF-Schwelle im Test-Cfg ueber der Beobachtung-Schwelle:
+    cfg_dcf = dict(cfg_off["dcf"]); cfg_dcf["buy_margin_of_safety_min"] = 0.40
+    cfg_off["dcf"] = cfg_dcf
     # avg3 durch altes niedriges Jahr gedrueckt, juengstes GJ hoch
     m = _mk_watch({2021: 1e9, 2022: 1e9, 2023: 1e9, 2024: 1e9, 2025: 30e9},
                   mcap=150e9)
@@ -206,10 +218,13 @@ def test_status_beobachtung_wenn_min_unter_30_aber_bestes_ok(cfg):
     row = out["row"]
     if row["mos_rule"] >= 0.30:
         assert row["status"] == "Beobachtung"
+        assert not out["dcf"].is_buy   # v70: Kandidat-Schwelle 0.40 > MoS
     else:
         # min < watch_min (z. B. SNDK-Situation mos_rule -87.9 %) -> nein
         assert row["status"] == "nein"
         assert not out["dcf"].is_buy
+    # v70: FCFF macht mos_rule ~0.33 >= 0.30 -> Beobachtung-Zweig ist aktiv
+    assert row["mos_rule"] >= 0.30
 
 
 def test_status_nein_wenn_quality_unter_60(cfg):
