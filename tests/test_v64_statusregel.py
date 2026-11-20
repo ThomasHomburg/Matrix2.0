@@ -78,11 +78,14 @@ def test_beobachtung_wenn_min_ge_watch_min_aber_bear_schwach():
 
 
 def test_nicht_normalisiert_nur_bei_zyklikern_mit_flag():
-    """Zykliker (Gold) mit < 7 Jahren Normalisierung und mos_min < watch_min ->
-    'Beobachtung (nicht normalisiert)' + Flags 'nicht normalisiert' und 'zyk:norm<7J'."""
+    """Zykliker (Gold) mit < 7 Jahren Normalisierung und mos_rule >= watch_min ->
+    'Beobachtung (nicht normalisiert)' + Flags 'nicht normalisiert' und 'zyk:norm<7J'.
+    v71: kleineres mcap, damit mos_rule das neue Status-Tor
+    (watch_margin_of_safety_min) erreicht -- die v64-Fixture mit mcap=500e9
+    lag darunter und bekam das Etikett nur wegen der torfreien v64-Regel."""
     cfg = _cfg()
-    # nur 4 Jahre -> zyk_unnorm; niedriges FCF -> mos_rule < watch_min
-    m = _mk({2022: 1e9, 2023: 1e9, 2024: 1e9, 2025: 1e9}, mcap=500e9,
+    # nur 4 Jahre -> zyk_unnorm; kleines mcap -> mos_rule >= watch_min (v71-Tor)
+    m = _mk({2022: 1e9, 2023: 1e9, 2024: 1e9, 2025: 1e9}, mcap=1e10,
             industry="Gold", sector="Basic Materials")
     row = evaluate_ticker(m, cfg)["row"]
     assert row["status"] == "Beobachtung (nicht normalisiert)"
