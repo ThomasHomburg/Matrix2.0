@@ -27,7 +27,10 @@ _ROW_MAP = {
     "ebit": ["Operating Income", "EBIT"],
     "ebitda": ["EBITDA", "Normalized EBITDA"],
     "net_income": ["Net Income", "Net Income Common Stockholders"],
-    "interest_expense": ["Interest Expense", "Net Interest Income", "Interest Expense Non Operating"],
+    # v70: "Net Interest Income" ENTFERNT -- anderer Sachverhalt (Netto-
+    # Zinsergebnis, teils Einnahme); abs() haette daraus falschen Aufwand
+    # gemacht. Fehlt "Interest Expense (Non Operating)" -> NaN (CLAUDE.md).
+    "interest_expense": ["Interest Expense", "Interest Expense Non Operating"],
     "income_tax_expense": ["Income Tax Expense", "Tax Provision"],
     "income_before_tax": ["Pretax Income", "Income Before Tax"],
     "shares_diluted": ["Diluted Average Shares", "Diluted Average Shares"],

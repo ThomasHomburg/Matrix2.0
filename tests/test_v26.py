@@ -54,6 +54,7 @@ def _ticker(fcf_sbc_by_fy=None, mcap: float = 1000.0, shares: float = 10.0,
     for i, fy in enumerate(sorted(fcf_sbc_by_fy)):
         y = {
             "fcf_sbc": Metric("fcf_sbc", fcf_sbc_by_fy[fy], "USD", "USD", fy),
+            "interest_expense": Metric("interest_expense", 0.0, "USD", "USD", fy),  # v70: 0 = gueltig
             "revenue": Metric("revenue", rev0 * (1 + cagr) ** i, "USD", "USD", fy),
             "shares_diluted": Metric("shares_diluted", shares, "shares", "USD", fy),
         }

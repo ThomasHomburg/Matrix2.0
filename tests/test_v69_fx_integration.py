@@ -47,9 +47,11 @@ def _conv(manual: dict) -> FXConverter:
     return c
 
 
-def _ttm(ends, used, quarter_end=None, cur="EUR", fcf_sbc=60.0):
+def _ttm(ends, used, quarter_end=None, cur="EUR", fcf_sbc=60.0, interest=0.0):
     t = TtmResult(
-        ttm={"fcf_sbc": Metric("fcf_sbc", fcf_sbc, cur, cur, 2026)},
+        ttm={"fcf_sbc": Metric("fcf_sbc", fcf_sbc, cur, cur, 2026),
+             # v70 (FCFF): TTM-Zinsaufwand (Default 0 = gueltig)
+             "interest_expense": Metric("interest_expense", interest, cur, cur, 2026)},
         quarter_end=quarter_end or ends[0], plausible=True)
     t.quarters = [{"quarter_end": e} for e in ends]
     t.flow_quarters_used = {"fcf_sbc": used, "fcf": used}
@@ -79,6 +81,9 @@ def _fx_ticker(ttm=None, fy_fcf=None, mcap=1000.0, price=None,
         y = {
             fcf_key: Metric(fcf_key, v, fy_cur, fy_cur, fy),
             "fcf": Metric("fcf", v, fy_cur, fy_cur, fy),
+            # v70 (FCFF): Zinsaufwand 0.0 (gueltig) -- sonst waere die
+            # FCFF-Basis dieser Fixture strikt n/a
+            "interest_expense": Metric("interest_expense", 0.0, fy_cur, fy_cur, fy),
             "revenue": Metric("revenue", 1000.0, fy_cur, fy_cur, fy),
             "shares_diluted": Metric("shares_diluted", 10.0, "shares", fy_cur, fy),
         }

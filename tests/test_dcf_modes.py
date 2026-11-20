@@ -46,6 +46,7 @@ def _ticker(fcf_sbc_by_fy=None, mcap: float = 1000.0, shares: float = 10.0,
     for i, fy in enumerate(revs):
         y = {
             "fcf_sbc": Metric("fcf_sbc", fcf_sbc_by_fy[fy], "USD", "USD", fy),
+            "interest_expense": Metric("interest_expense", 0.0, "USD", "USD", fy),  # v70: 0 = gueltig
             "revenue": Metric("revenue", rev0 * (1 + cagr) ** i, "USD", "USD", fy),
             "shares_diluted": Metric("shares_diluted", shares, "shares", "USD", fy),
         }
@@ -66,7 +67,9 @@ def _attach_ttm(m, quarter_end="2026-06-30", fcf_sbc=150.0,
     """v69: haengt einen periodisch belastbaren TtmResult an m an
     (flow_quarters_used + quarters fuer das echte TTM-Fenster)."""
     quarters, fqu = _ttm_quarters(quarter_end)
-    ttm_metrics = {"fcf_sbc": Metric("fcf_sbc", fcf_sbc, "USD", "USD", 2026)}
+    ttm_metrics = {"fcf_sbc": Metric("fcf_sbc", fcf_sbc, "USD", "USD", 2026),
+                   # v70 (FCFF): TTM-Zinsaufwand 0.0 (gueltig) -- sonst n/a
+                   "interest_expense": Metric("interest_expense", 0.0, "USD", "USD", 2026)}
     if net_debt is not None:
         ttm_metrics["net_debt"] = Metric("net_debt", net_debt, "USD", "USD", 2026)
     if customer_deposits is not None:

@@ -120,6 +120,29 @@ def tax_rate(m: TickerMetrics, fy: int) -> float:
     return eff
 
 
+def tax_rate_ttm(ttm) -> float:
+    """v70: Effektiver TTM-Steuersatz -- Logik IDENTISCH zu tax_rate(m, fy),
+    nur auf TtmResult (Summe der letzten 4 Quartale) statt m.years:
+    Steueraufwand/Vorsteuergewinn, begrenzt auf tax_rate_min..tax_rate_max;
+    ausserhalb davon und bei Vorsteuerverlust der Normsteuersatz. Fehlende
+    Daten -> NaN (kein Raten)."""
+    if ttm is None:
+        return float("nan")
+    tm = getattr(ttm, "ttm", None) or {}
+    tax = tm.get("income_tax_expense")
+    pretax = tm.get("income_before_tax")
+    if tax is None or pretax is None:
+        return float("nan")
+    t, p = tax.value, pretax.value
+    if _nan(t, p) or p == 0:
+        return float("nan")
+    t_min, t_max, t_norm = _tax_bounds()
+    eff = t / p
+    if _nan(eff) or eff < t_min or eff > t_max or p <= 0:
+        return t_norm
+    return eff
+
+
 def nopat(m: TickerMetrics, fy: int) -> float:
     """NOPAT = EBIT * (1 - Steuersatz).
 

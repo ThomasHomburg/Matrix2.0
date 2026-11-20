@@ -88,6 +88,7 @@ def _annual_ticker(fcf_sbc_by_fy: dict[int, float], rev_by_fy: dict[int, float],
     for fy in sorted(fiscal_ends):
         m.years[fy] = {
             "fcf_sbc": Metric("fcf_sbc", fcf_sbc_by_fy[fy], "USD", "USD", fy),
+            "interest_expense": Metric("interest_expense", 0.0, "USD", "USD", fy),  # v70: 0 = gueltig
             "revenue": Metric("revenue", rev_by_fy[fy], "USD", "USD", fy),
             "shares_diluted": Metric("shares_diluted", shares, "shares", "USD", fy),
         }
@@ -199,7 +200,10 @@ def _ticker_with_ttm(fy_fcf_sbc: dict[int, float], ttm_fcf_sbc: float,
                        fiscal_ends)
     ttm = TtmResult(
         ttm={"fcf_sbc": Metric("fcf_sbc", ttm_fcf_sbc, "USD", "USD",
-                               int(ttm_end[:4]))},
+                               int(ttm_end[:4])),
+             # v70 (FCFF): TTM-Zinsaufwand 0.0 (gueltig) -- sonst n/a
+             "interest_expense": Metric("interest_expense", 0.0, "USD", "USD",
+                                        int(ttm_end[:4]))},
         quarter_end=ttm_end, base_label=f"TTM bis {ttm_end[:7]}",
         plausible=True,
     )

@@ -338,6 +338,15 @@ dcf:
                               # | avg3 (O letzte 3 GJ) | latest (juengstes GJ)
                               # | ttm (TTM O: TTM + 2 nicht ueberlappende GJ)
                               # | ttm_only (reiner TTM-Start, ohne O)
+  fcf_basis: "fcff"          ## v70 FCFF-Basis: Start-FCF um Zinsaufwand nach
+                              # Steuern anheben (unlevered; konsistent zum
+                              # ND-Abzug, keine Doppelbestrafung der Schulden)
+                              # | levered_legacy (altes Verhalten: levered FCF
+                              # bei gleichzeitigem ND-Abzug). Ticker MIT
+                              # Boersen-Suffix (IFRS/IAS 7) bleiben
+                              # automatisch auf levered_legacy (Flag
+                              # fcf_basis:legacy_nonUS); fehlender Schalter
+                              # = fcff.
   net_debt_mode: reported    ## Nettoverschuldung: reported (gemeldet) |
                               # incl_sti (Schulden - (Cash + kurzfr. Anlagen))
   mos_min_mode: min          ## Kandidatenregel MoS: min (Minimum der 4 Startwert-MoS)
@@ -411,6 +420,12 @@ decisions:
   share_basis_fix:
     datum: "2026-11-11"
     hinweis: "Aktienbasis-Fix: p, EW und Kaufzone ungueltig, Rendite-Start unveraendert"
+  # v70 Altbestand FCFF-Fix: Alt-Zeilen (berechnet mit levered FCF BEVOR dem
+  # Methodenwechsel) werden nur MARKIERT (flags-Spalte), nicht geloescht oder
+  # neu gerechnet; Werte sind mit dem neuen Modell nicht vergleichbar.
+  fcff_fix:
+    datum: "2026-11-19"
+    hinweis: "FCFF-Fix: iv/MoS basieren auf levered FCF (Modell v62-v69), nicht mit v70 vergleichbar"
   baskets:
     # screener: alle Ticker mit einem dieser Status (Default = watchlist.statuses)
     screener_statuses: ["Kandidat", "Beobachtung", "Beobachtung (nicht normalisiert)"]
@@ -433,7 +448,7 @@ decisions:
 
 # Ein-Kommando-Quartalslauf (quartalslauf.py run)
 quartalslauf:
-  version: 62                                  ## v{version} in der Ausgabedatei
+  version: 70                                  ## v{version} in der Ausgabedatei
   db: "value_tracker.db"
   tickers_csv: "tickers_sp500.csv"             ## Universum fuer run_ranking.py
   watch_csv: "ticker_watch_v40.csv"            ## Watchlist fuer overlap/live_update
