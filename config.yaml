@@ -426,6 +426,13 @@ decisions:
   fcff_fix:
     datum: "2026-11-19"
     hinweis: "FCFF-Fix: iv/MoS basieren auf levered FCF (Modell v62-v69), nicht mit v70 vergleichbar"
+  # v71 Altbestand Zykliker-Status-Tor: decisions-Zeilen mit Status
+  # "Beobachtung (nicht normalisiert)" aus der Zeit OHNE MoS-Tor (v64-Regel)
+  # werden nur MARKIERT (flags-Spalte 'zyk_ohne_mos_tor'), nichts geloescht
+  # oder neu gerechnet; Werte (iv/MoS) bleiben unveraendert gueltig.
+  status_fix:
+    datum: "2026-11-20"
+    hinweis: "Korb screener enthielt Zykliker ohne MoS-Tor"
   baskets:
     # screener: alle Ticker mit einem dieser Status (Default = watchlist.statuses)
     screener_statuses: ["Kandidat", "Beobachtung", "Beobachtung (nicht normalisiert)"]

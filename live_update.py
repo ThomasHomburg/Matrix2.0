@@ -548,6 +548,42 @@ def migrate_fcff_fix(con: sqlite3.Connection, cfg: dict) -> int:
     return n
 
 
+def migrate_status_fix(con: sqlite3.Connection, cfg: dict) -> tuple[int, int]:
+    """v71 Altbestand Zykliker-Status-Tor: decisions-Zeilen mit dem Status
+    'Beobachtung (nicht normalisiert)', die OHNE das neue MoS-Tor (v64-Regel:
+    Etikett unabhaengig von der MoS) entstanden sind, werden nur MARKIERT
+    (flags-Spalte 'zyk_ohne_mos_tor'), nichts geloescht oder neu gerechnet.
+    Betroffen sind Zeilen mit diesem Etikett UND mos_min <
+    dcf.watch_margin_of_safety_min (mos_min NULL zaehlt als betroffen --
+    ohne MoS gab es kein Tor). Rueckgabe (n_markiert, n_etikett_gesamt).
+    Werte (iv/MoS) bleiben unveraendert gueltig -- nur der Status war
+    ohne MoS-Bedingung vergeben."""
+    fix = cfg.get("decisions", {}).get("status_fix", {}) or {}
+    watch_min = float(cfg.get("dcf", {}).get("watch_margin_of_safety_min", 0.30))
+    marker = "zyk_ohne_mos_tor"
+    label = "Beobachtung (nicht normalisiert)"
+    hinweis = str(fix.get("hinweis", "Korb screener enthielt Zykliker ohne MoS-Tor"))
+    fix_datum = str(fix.get("datum", ""))
+    cols = {x[1] for x in con.execute("PRAGMA table_info(decisions)")}
+    if not {"status_screener", "mos_min", "flags", "datum"} <= cols:
+        return 0, 0
+    n_label = con.execute(
+        "SELECT COUNT(*) FROM decisions WHERE status_screener = ?", (label,)).fetchone()[0]
+    # nur Zeilen mit Etikett UND (mos_min fehlt ODER unter der Schwelle)
+    n = con.execute(
+        "UPDATE decisions SET flags=CASE WHEN flags LIKE ? THEN flags "
+        "ELSE trim(coalesce(flags, '') || ' ' || ?) END "
+        "WHERE status_screener = ? AND (mos_min IS NULL OR mos_min < ?)",
+        (f"%{marker}%", marker, label, watch_min)).rowcount
+    if fix_datum and "hinweis" in cols:
+        con.execute(
+            "UPDATE decisions SET hinweis=? WHERE datum=? AND korb<>'' "
+            "AND status_screener=? AND (hinweis IS NULL OR hinweis='')",
+            (hinweis, fix_datum, label))
+    con.commit()
+    return n, n_label
+
+
 def store_live_status(con: sqlite3.Connection, out_rows: list[dict],
                       prices: dict[str, dict]) -> None:
     """v53: Live-Stand in value_tracker.db persistieren (Seite 5 Watchlist Live
@@ -676,6 +712,10 @@ def main() -> None:
     n_fcff = migrate_fcff_fix(con, cfg)
     if n_fcff:
         logger.info("FCFF-Fix: %d Alt-Zeilen markiert (%s)", n_fcff, "fcff_vor_v70")
+    # v71 Altbestand: Zykliker-Etikett ohne MoS-Tor nur markieren, nichts loeschen
+    n_status, n_label_gesamt = migrate_status_fix(con, cfg)
+    logger.info("Zykliker-Status-Tor: markiert %d von %d Zeilen mit diesem Etikett",
+                n_status, n_label_gesamt)
     con.close()
     write_watchlist_csv(out_rows, args.out)
     print_table(out_rows)

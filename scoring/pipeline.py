@@ -461,17 +461,33 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict, fx=None) -> dict:
         status_detail = status_all_detail = status_recent2_detail = (
             "SBC fehlt in allen Jahren; ohne SBC Quality ≥ "
             f"{quality_min:.0f} und MoS ≥ {mos_min:.0%} -> manuell pruefen; nie Kandidat")
-    # Zykliker ohne volle Normalisierung -> nie Kandidat, max. Beobachtung
+    # Zykliker ohne volle Normalisierung -> nie Kandidat, max. Beobachtung.
+    # v71: Status-Tor -- das Etikett "Beobachtung (nicht normalisiert)" wird
+    # NUR vergeben, wenn das Kandidatenregel-MoS (mos_rule) die Beobachtungs-
+    # schwelle erreicht (gleiche Schwelle wie die normale Beobachtung,
+    # Config-Schluessel dcf/watch_margin_of_safety_min, keine zweite Magic
+    # Number). Unterhalb
+    # bleibt es beim bisherigen Status (i. d. R. "nein"); is_buy bleibt
+    # False und die Flags bleiben als Hinweis erhalten.
     if zyk_unnorm and status in ("Kandidat", "Beobachtung", "nein"):
-        # v64: Ausnahme "nicht normalisiert" NUR bei Zyklikern, mit sichtbarem
-        # Hinweis im Status UND in den Flags
-        status = status_all = status_recent2 = "Beobachtung (nicht normalisiert)"
-        status_detail = status_all_detail = status_recent2_detail = (
-            f"Zykliker ({m.industry}): nur {norm_years} Jahre Normalisierung "
-            f"(< {rule.normalized_earnings_years}) -> max. Beobachtung; nie Kandidat")
-        dcf.is_buy = False
+        dcf.is_buy = False  # nie Kandidat bei unvollstaendiger Normalisierung
         if "nicht normalisiert" not in flag_parts:
             flag_parts.append("nicht normalisiert")
+        if mos_rule == mos_rule and mos_rule >= watch_min:
+            status = status_all = status_recent2 = "Beobachtung (nicht normalisiert)"
+            status_detail = status_all_detail = status_recent2_detail = (
+                f"Zykliker ({m.industry}): nur {norm_years} Jahre Normalisierung "
+                f"(< {rule.normalized_earnings_years}); MoS min {mos_rule:.1%} >= "
+                f"{watch_min:.0%} -> max. Beobachtung; nie Kandidat")
+        elif status == "Kandidat":
+            # Projekt-Konfiguration: buy_margin_of_safety_min (0.40) >=
+            # watch_min (0.30) -> praktisch unerreichbar. Nur bei
+            # widerspruechlich konfigurierten Schwellen wird der vom
+            # Zykliker-Schutz degradierte Kandidat-Status hier konsistent
+            # neu bestimmt.
+            status, status_detail = _status_for(mos_rule, mos_vals, False)
+            status_all, status_all_detail = status, status_detail
+            status_recent2, status_recent2_detail = status, status_detail
 
 
     # SBC fehlt -> DCF/FCF ohne SBC (Fallback Roh-FCF) -> Flag;
