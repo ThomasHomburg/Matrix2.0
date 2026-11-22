@@ -468,7 +468,7 @@ decisions:
 
 # Ein-Kommando-Quartalslauf (quartalslauf.py run)
 quartalslauf:
-  version: 70                                  ## v{version} in der Ausgabedatei
+  version: 72                                  ## v{version} in der Ausgabedatei
   db: "value_tracker.db"
   tickers_csv: "tickers_sp500.csv"             ## Universum fuer run_ranking.py
   watch_csv: "ticker_watch_v40.csv"            ## Watchlist fuer overlap/live_update

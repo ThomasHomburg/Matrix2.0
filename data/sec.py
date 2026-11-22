@@ -226,7 +226,7 @@ def _sec_annual_values(facts: dict, key: str) -> dict[int, float]:
     """Jaehrliche SEC-Werte (USD, 10-K/10-K/A, frame=None) je Kennzahl.
 
     Rueckgabe: {fiscal_year_end_year: value}. Nur abgeschlossene
-    Jahresperioden (start + 12 Monate ≈ end, end-Datum im Jahr).
+    Jahresperioden (start + 12 Monate ~ end, end-Datum im Jahr).
     """
     out = {}
     dei = facts.get("facts", {}).get("dei", {})
