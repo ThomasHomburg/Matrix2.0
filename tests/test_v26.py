@@ -258,10 +258,12 @@ def test_sec_check_nicht_us(cfg_sec):
     assert "kein US-Ticker" in res.note
 
 
-def test_sec_check_user_agent_aus_config(cfg_sec, monkeypatch):
-    """User-Agent kommt aus config.yaml (Platzhalter mit E-Mail)."""
+def test_sec_check_user_agent_aus_umgebung(cfg_sec, monkeypatch):
+    """v72: User-Agent kommt aus der Umgebungsvariable SEC_USER_AGENT
+    (kein Config-Eintrag mehr). Vorher: sec.user_agent aus config.yaml."""
+    import os
     from data import sec as sec_mod
-    assert cfg_sec["sec"]["user_agent"] == "Value-Screener research@example.com"
+    monkeypatch.setenv("SEC_USER_AGENT", "Value-Screener research@example.com")
     captured = {}
 
     def fake_fetch(cik, user_agent):
@@ -274,6 +276,7 @@ def test_sec_check_user_agent_aus_config(cfg_sec, monkeypatch):
     qual = next(c for c in demo_companies() if c.ticker == "QUAL")
     sec_mod.sec_check(qual, cfg_sec)
     assert captured["ua"] == "Value-Screener research@example.com"
+    assert os.environ["SEC_USER_AGENT"] == "Value-Screener research@example.com"
 
 
 def test_sec_check_flag_bei_abweichung(cfg_sec, monkeypatch):

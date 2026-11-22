@@ -93,6 +93,12 @@ class TickerMetrics:
     # Der Normalizer selbst ist NICHT Teil von F2-B; das Gate wertet nur
     # das Feld aus (kein String-Raten aus "GBP").
     fx_unit_state: str = "unbekannt"
+    # v72 Zinsaufwand-Zweitquelle: SEC-Zins je Quelle, gesetzt von der
+    # Pipeline (data.sec.sec_interest_fallback), verwendet von der DCF-
+    # FCFF-Behandlung NUR wenn yfinance NaN liefert. Struktur:
+    # {"FY": {fy_int: (wert, tag)}, "TTM": (wert, tag) | None,
+    #  "abweichungen": [...], "aus_cache": bool, "note": str}
+    sec_interest: dict = field(default_factory=dict)
 
     # ---------- v64: Serialisierung (Resume-Cache run_ranking.py) ----------
 
@@ -122,6 +128,7 @@ class TickerMetrics:
             "ttm": ttm_to_dict(self.ttm) if self.ttm is not None else None,
             "ttm_plausible": self.ttm_plausible,
             "fx_unit_state": self.fx_unit_state,
+            "sec_interest": self.sec_interest or {},   # v72 (Alt-Cache: Default {})
             "ttm_fallback": self.ttm_fallback,
             "fiscal_ends": {int(fy): d for fy, d in self.fiscal_ends.items()},
         }
@@ -170,6 +177,7 @@ class TickerMetrics:
         m.ttm_fallback = bool(data.get("ttm_fallback") or False)
         # v69: fehlendes Feld (alte Cache-Eintraege) -> "unbekannt" (konservativ)
         m.fx_unit_state = str(data.get("fx_unit_state") or "unbekannt")
+        m.sec_interest = dict(data.get("sec_interest") or {})  # v72, Alt-Cache: {}
         fiscal = data.get("fiscal_ends")
         if fiscal:
             if not isinstance(fiscal, dict):

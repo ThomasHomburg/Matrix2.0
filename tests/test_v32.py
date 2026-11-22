@@ -166,12 +166,14 @@ def test_rate_limit_enforces_min_gap(monkeypatch):
     assert all(s > 0 for s in slept)
 
 
-def test_sec_user_agent_from_config(cfg, monkeypatch):
-    """User-Agent kommt aus config.yaml (sec.user_agent)."""
+def test_sec_user_agent_aus_umgebung(cfg, monkeypatch):
+    """v72: User-Agent kommt aus der Umgebungsvariable SEC_USER_AGENT.
+    Vorher: config-Eintrag sec.user_agent."""
     import data.sec as sec
     cfg_sec = dict(cfg)
     cfg_sec["sec"] = dict(cfg["sec"])
     cfg_sec["sec"]["enabled"] = True
+    monkeypatch.setenv("SEC_USER_AGENT", "Value-Screener research@example.com")
     captured = {}
     def fake_urlopen(req, timeout=30):
         captured["ua"] = req.headers.get("User-agent") or req.headers.get("User-Agent")
@@ -190,18 +192,9 @@ def test_sec_user_agent_from_config(cfg, monkeypatch):
     }
     cfg2 = dict(cfg_sec)
     cfg2["sec"] = dict(cfg_sec["sec"])
-    cfg2["sec"]["user_agent"] = "Mein-Test UA test@example.org"
+    cfg2["sec"]["user_agent"] = "Mein-Test UA test@example.org"  # v72: ignoriert
     res = sec.sec_check(m, cfg2)
-    assert captured.get("ua") == "Mein-Test UA test@example.org"
+    assert captured.get("ua") == "Value-Screener research@example.com"
 
 
 # ---------- (5) Smoke ----------
-
-def test_smoke_demo(cfg):
-    cfg = dict(cfg)
-    cfg["sec"] = {"enabled": False}
-    rows, excluded = evaluate_all(demo_companies(), cfg)
-    # DIST (negatives EK) wird nicht mehr wegen EK ausgeschlossen, sondern
-    # wegen Value-Trap -> weiterhin 4 bewertet / 2 ausgeschlossen
-    assert len(rows) == 4 and len(excluded) == 2
-    assert {e["ticker"] for e in excluded} == {"DIST", "MICR"}

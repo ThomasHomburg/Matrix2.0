@@ -245,6 +245,11 @@ def _write_ranking_csv(rows: list[dict], excluded: list[dict], errors: list[dict
 def main() -> None:
     args = _parse_args(sys.argv[1:])
     cfg = load_config()
+    # v72: SEC-User-Agent einmal beim Prozessstart pruefen (Umgebungsvariable
+    # SEC_USER_AGENT, klarer RuntimeError VOR dem ersten SEC-Request)
+    if cfg.get("sec", {}).get("enabled", True):
+        from data.sec import validate_user_agent
+        validate_user_agent()
     api_key = os.environ.get("FMP_API_KEY", "")
 
     # Provider-Modus: Auswahl per Ticker-Suffix (FMP fuer US, yfinance sonst)

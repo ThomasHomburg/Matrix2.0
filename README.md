@@ -10,6 +10,11 @@ pip install -r requirements.txt                      # streamlit, pandas, altair
 # FMP_API_KEY als Umgebungsvariable setzen (optional -- nur fuer US-Ticker via FMP;
 # wird nie committed, siehe .gitignore):
 #   export FMP_API_KEY="dein_key"     (Linux/Mac)   $env:FMP_API_KEY="dein_key"   (Windows PowerShell)
+# SEC-EDGAR (Abgleich/Fallbacks inkl. Zinsaufwand-Zweitquelle v72) benoetigt
+# PFLICHT einen User-Agent mit E-Mail (SEC-Policy) als Umgebungsvariable
+# SEC_USER_AGENT -- NICHT mehr in config.yaml; run_ranking/quartalslauf/app
+# pruefen sie beim Start und brechen mit klarer Fehlermeldung ab:
+#   export SEC_USER_AGENT="Vorname Nachname <mail@example.com>"
 ```
 
 Datenquellen: FMP (US-Ticker, mit Key) bzw. yfinance (alle anderen Suffixe .DE/.AS/...), kein Key noetig. Live-Ticker stehen in `tickers.csv` (Spalte `ticker`).

@@ -1,7 +1,13 @@
+import os
 import sys
 from pathlib import Path
 
 import pytest
+
+# v72: SEC-User-Agent kommt aus der Umgebungsvariable SEC_USER_AGENT
+# (kein Config-Fallback mehr). Tests laufen ohne echten SEC-Kontakt, aber
+# data/sec.py validiert die Variable -- daher Dummy-Wert je Testprozess.
+os.environ.setdefault("SEC_USER_AGENT", "Value-Screener-Tests test@example.com")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

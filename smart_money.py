@@ -182,9 +182,14 @@ def user_agent_from_cfg(cfg: dict) -> str:
     """
     sm = cfg.get("smart_money", {})
     sec = cfg.get("sec", {})
-    ua = str(sm.get("user_agent") or "").strip() or str(sec.get("user_agent") or "").strip()
-    if not ua and sec.get("enabled") is False:
-        return ""  # Test-Modus: kein echter Kontakt konfiguriert
+    ua = str(sm.get("user_agent") or "").strip()
+    if not ua:
+        if sec.get("enabled") is False:
+            return ""  # Test-Modus: kein echter Kontakt konfiguriert
+        # v72: Fallback sec.user_agent entfaellt -> Umgebungsvariable
+        # SEC_USER_AGENT (data.sec.user_agent, inkl. Validierung)
+        from data.sec import user_agent as sec_user_agent
+        return sec_user_agent()
     return validate_user_agent(ua)
 
 

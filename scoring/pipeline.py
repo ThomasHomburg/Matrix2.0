@@ -83,6 +83,22 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict, fx=None) -> dict:
             logger.warning("%s: SEC-SBC-Fallback fehlgeschlagen: %s", m.ticker, exc)
     out["sbc_sec_sources"] = sbc_sec_sources
 
+    # v72 Zinsaufwand-Zweitquelle: SEC-Werte je Quelle (FY/TTM) laden und
+    # an TickerMetrics haengen (Nur ohne Boersensuffix; yfinance bleibt
+    # Vorrang -- die DCF-FCFF-Behandlung greift nur bei NaN zurueck).
+    # Ausnahmen (deaktiviert/Netzfehler/kein CIK) sind NICHT fatal: dann
+    # bleibt der Zins-Status wie v70 (ggf. zinsaufwand_fehlend).
+    if cfg.get("sec", {}).get("enabled", True):
+        try:
+            from data.sec import sec_interest_fallback
+            m.sec_interest = sec_interest_fallback(m, cfg)
+            if m.sec_interest.get("note"):
+                logger.info("%s: SEC-Zins-Fallback: %s", m.ticker,
+                            m.sec_interest["note"])
+        except Exception as exc:
+            logger.warning("%s: SEC-Zins-Fallback fehlgeschlagen: %s",
+                            m.ticker, exc)
+
     criteria = compute_criteria(m, cfg, fx=fx)
     result = score_ticker(criteria, cfg["criteria"], cfg.get("score_groups"))
     out["criteria"] = criteria
@@ -512,6 +528,32 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict, fx=None) -> dict:
                     m.ticker, norm_years, rule.normalized_earnings_years)
     if rule.group == "reits":
         logger.info("%s: REIT (%s) -- %s", m.ticker, m.industry, rule.note)
+    # v72 Zinsaufwand-Zweitquelle: Herkunfts-/Hinweis-Flags
+    for _qi in getattr(dcf, "fcff_interest_sources", []):
+        if ":sec:" in _qi:                       # z. B. "FY2025:sec:InterestExpense"
+            _tag = _qi.split(":sec:", 1)[1]
+            _flag = f"zins:sec:{_tag}"
+            if _flag not in flag_parts:
+                flag_parts.append(_flag)
+    _zins_sch = getattr(dcf, "fcff_zins_schaetzung", float("nan"))
+    if _zins_sch == _zins_sch:      # keine NaN-Zahl -> Regel aktiv
+        if "zins_unwesentlich" not in flag_parts:
+            flag_parts.append("zins_unwesentlich")
+    # Abweichungsflag NUR, wenn die companyfacts-Antwort ohnehin aus dem
+    # Cache kam (kein zusaetzlicher Abruf dafuer; sonst nur Tool/CSV)
+    _sec_int = getattr(m, "sec_interest", None) or {}
+    if _sec_int.get("aus_cache"):
+        from data.sec import _INTEREST_DEV_THRESHOLD
+        for _aw in _sec_int.get("abweichungen") or []:
+            _dev = _aw.get("abweichung")
+            if _dev == _dev and _dev > _INTEREST_DEV_THRESHOLD:
+                if "zins_quellen_abweichend" not in flag_parts:
+                    flag_parts.append("zins_quellen_abweichend")
+                logger.info("%s: SEC-Zins weicht ab (%s: yfinance %.3g vs "
+                            "SEC %.3g, %0.1f%%) -- Rechenwert bleibt yfinance",
+                            m.ticker, _aw.get("periode"), _aw.get("yfinance"),
+                            _aw.get("sec"), _dev * 100)
+                break
     if dcf.is_buy:
         flag_parts.append("kauf")
         logger.info("%s: Kaufkandidat (Quality %.1f, MoS Base %.1f%%, Bear >= 80%% Kurs)",
@@ -748,6 +790,9 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict, fx=None) -> dict:
         "dcf_fcff_status": getattr(dcf, "fcff_status", ""),
         "dcf_fcff_interest_added": getattr(dcf, "fcff_interest_added", float("nan")),
         "dcf_fcff_steuersatz_normiert": getattr(dcf, "fcff_steuersatz_normiert", False),
+        # v72: Zins-Herkunft je Quelle + Wesentlichkeits-Schaetzung
+        "dcf_fcff_interest_sources": getattr(dcf, "fcff_interest_sources", []),
+        "dcf_fcff_zins_schaetzung": getattr(dcf, "fcff_zins_schaetzung", float("nan")),
         "dcf_net_debt_fx_asof": getattr(dcf, "net_debt_fx_asof", ""),
         "shares_current_status": getattr(dcf, "shares_current_status", ""),
         "ttm_plausible": getattr(m, "ttm_plausible", True),
