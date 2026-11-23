@@ -102,6 +102,9 @@ class DcfResult:
     fcff_status: str = ""             # "" | ok | zinsaufwand_fehlend (strikt n/a, kein Fallback)
     fcff_interest_added: float = float("nan")  # Ø-Zinsaufschlag je Quelle (Berichtswaehrung, roh, Information)
     fcff_steuersatz_normiert: bool = False     # True, wenn bei Zinsen > 0 der Normsteuersatz benutzt wurde (tax-Daten fehlen)
+    # --- v72 (Zins-Zweitquelle SEC) ------------------------------------------
+    fcff_interest_sources: list = field(default_factory=list)  # je Quelle: "<label>:yfinance" | "<label>:sec:<tag>" | "<label>:unwesentlich"
+    fcff_zins_schaetzung: float = float("nan")  # Wesentlichkeitsregel: unterstellter nach-Steuer-Zins (konservativ, Max), NaN = nicht angewendet
 
 
 def _cagr(values: list[float]) -> float:
@@ -607,66 +610,180 @@ def _ttm_skip_status(m: TickerMetrics) -> str:
 
 
 def _fcff_source_interest_tax(m: TickerMetrics, label: str
-                               ) -> "tuple[object, float]":
-    """v70: Zinsaufwand + Steuersatz EINER FCF-Quelle (Berichtswährung).
+                             ) -> "tuple[float | None, float, str]":
+    """v70/v72: Zinsaufwand + Steuersatz EINER FCF-Quelle (Berichtswaehrung).
 
     TTM-Quelle -> TtmResult (Summe letzter 4 Quartale; interest_expense liegt
     in FLOW_KEYS), Steuersatz via tax_rate_ttm. FY-Quelle -> m.years[fy],
-    Steuersatz via tax_rate. Rueckgabe (interest_metric, steuersatz);
-    interest_metric None bei fehlender Quarter. Der Steuersatz wird nur bei
-    Zinsaufwand > 0 benoetigt (interest 0 -> keine Steuerdaten noetig)."""
+    Steuersatz via tax_rate.
+
+    v72 Zweitquelle: liefert yfinance NaN/nichts, greift NUR dann der
+    Rueckgriff auf m.sec_interest (von data.sec.sec_interest_fallback
+    gefuellte SEC-Werte; yfinance bleibt Vorrang, kein Mischen).
+    Rueckgabe (zinsaufwand_float | None, steuersatz, quelle);
+    quelle = "yfinance" | "sec:<tag>"; Zinsaufwand None = nach beiden
+    Quellen fehlt. Der Steuersatz wird nur bei Zinsaufwand > 0 benoetigt."""
     lbl = str(label)
     if lbl.startswith("TTM"):
         ttm = getattr(m, "ttm", None)
         tm = getattr(ttm, "ttm", None) or {}
-        return tm.get("interest_expense"), tax_rate_ttm(ttm)
+        ie = tm.get("interest_expense")
+        if ie is not None and not ie.is_na():
+            return abs(float(ie.value)), tax_rate_ttm(ttm), "yfinance"
+        sec = (getattr(m, "sec_interest", None) or {}).get("TTM")
+        if sec is not None:
+            sv, tag = sec
+            return abs(float(sv)), tax_rate_ttm(ttm), f"sec:{tag}"
+        return None, float("nan"), ""
     try:
         fy = int(lbl[2:])
     except ValueError:
-        return None, float("nan")
+        return None, float("nan"), ""
     y = m.years.get(fy, {})
-    return y.get("interest_expense"), tax_rate(m, fy)
+    ie = y.get("interest_expense")
+    if ie is not None and not ie.is_na():
+        return abs(float(ie.value)), tax_rate(m, fy), "yfinance"
+    sec = ((getattr(m, "sec_interest", None) or {}).get("FY") or {}).get(fy)
+    if sec is not None:
+        sv, tag = sec
+        return abs(float(sv)), tax_rate(m, fy), f"sec:{tag}"
+    return None, float("nan"), ""
 
 
 def _fcff_adjust_start(m: TickerMetrics, start: dict
-                       ) -> "tuple[dict | None, float, bool]":
-    """v70: FCFF-Basis je Quelle (VOR der FX-Konvertierung, in
-    Berichtswährung): wert_fcff = fcf + |Zinsaufwand| * (1 - t).
+                      ) -> "tuple[list | None, float, bool]":
+    """v70/v72: FCFF-Basis je Quelle (VOR der FX-Konvertierung, in
+    Berichtswaehrung): wert_fcff = fcf + |Zinsaufwand| * (1 - t).
 
-    - Fehlender/NaN-Zinsaufwand: strikt n/a (kein stiller Fallback,
-      CLAUDE.md) -> Rueckgabe (None, nan, False).
     - Zinsaufwand exakt 0 ist ein GUELTIGER Wert (kein Steuersatz noetig).
     - Steuersatz NaN bei Zinsen > 0 -> Normsteuersatz + Flag
       steuersatz_normiert (Entscheidung D1=B, Freigabe v70).
-    Gewichtung/Quellenauswahl bleiben unveraendert: nur die Quellenwerte
-    werden adjustiert, danach laeuft die bestehende Pipeline (Mittelung,
-    _convert_fcf_sources) unverändert weiter. Rueckgabe
-    (start_neu | None, Ø-Zinsaufschlag, steuersatz_normiert)."""
+    - v72: Fehlt der Zinsaufwand EINER Quelle nach yfinance UND SEC, wird
+      diese Quelle OFFEN MARKIERT (adj=None) statt sofort n/a; die
+      endgueltige Entscheidung (Wesentlichkeitsregel -> Aufschlag 0 oder
+      strikt n/a) wird in compute_dcf NACH der ND-Ermittlung nachgeholt
+      (die Regel braucht ND/Marktkap.).
+    Rueckgabe (plan | None, Mittel-Zinsaufschlag, steuersatz_normiert);
+    plan = Liste je Quelle: {label, value, cur, adj | None, quelle}."""
     nan = float("nan")
     sources = list(start.get("sources") or [])
     if not sources:
         return None, nan, False
     t_min, t_max, t_norm = _tax_bounds()
-    out_sources: list[tuple] = []
     adj_vals: list[float] = []
     steuer_normiert = False
+    plan = []
     for label, value, cur in sources:
-        ie_m, t = _fcff_source_interest_tax(m, label)
-        if ie_m is None or ie_m.is_na():
-            return None, nan, False      # Zinsaufwand fehlt -> strikt n/a
-        ie = abs(ie_m.value)
+        ie, t, quelle = _fcff_source_interest_tax(m, label)
+        if ie is None:
+            plan.append({"label": str(label), "value": float(value), "cur": cur,
+                         "adj": None, "quelle": ""})
+            continue
         if ie == 0:
             t = 0.0                      # kein Steuersatz erforderlich
         elif t != t:
             t = t_norm                   # D1=B: Normsteuersatz + Flag
             steuer_normiert = True
         adj = ie * (1.0 - t)
-        out_sources.append((str(label), float(value) + adj, cur))
+        plan.append({"label": str(label), "value": float(value), "cur": cur,
+                     "adj": adj, "quelle": quelle})
         adj_vals.append(adj)
+    avg = (sum(adj_vals) / len(adj_vals)) if adj_vals else nan
+    return plan, avg, steuer_normiert
+
+
+def _start_from_plan(start: dict, plan: list) -> dict:
+    """Finalisiert den Start-FCF aus dem Quellen-Plan: Quellen mit adj
+    werden angehoben, offen markierte Quellen laufen in compute_dcf ueber
+    die Wesentlichkeitsentscheidung mit adj=0 hinein."""
+    sources = [(p["label"], p["value"] + (p["adj"] or 0.0), p["cur"])
+               for p in plan]
     new_start = dict(start)
-    new_start["sources"] = out_sources
-    new_start["fcf"] = sum(v for _, v, _ in out_sources) / len(out_sources)
-    return new_start, sum(adj_vals) / len(adj_vals), steuer_normiert
+    new_start["sources"] = sources
+    new_start["fcf"] = sum(v for _, v, _ in sources) / len(sources)
+    return new_start
+
+
+def _fcff_quellen_ende(m: TickerMetrics, label: str):
+    """Periodenende einer FCF-Quelle als date (TTM -> Quartalsende,
+    FY<n> -> fiscal_ends[n]); None wenn unbekannt."""
+    import datetime as _dt
+    lbl = str(label)
+    try:
+        if lbl.startswith("TTM"):
+            ttm = getattr(m, "ttm", None)
+            if ttm is None or not getattr(ttm, "quarter_end", ""):
+                return None
+            return _dt.date.fromisoformat(str(ttm.quarter_end)[:10])
+        fe = (m.fiscal_ends or {}).get(int(lbl[2:]))
+        return _dt.date.fromisoformat(str(fe)[:10]) if fe else None
+    except ValueError:
+        return None
+
+
+def _zins_unwesentlich(m: TickerMetrics, dcfg: dict, pending: list,
+                       nd_conv: float, mcap_value: float) -> "tuple[bool, float]":
+    """v72 Wesentlichkeitsregel fuer offen markierte Quellen (kein Zinsaufwand
+    aus yfinance UND SEC, z. B. AAPL ab FY2024):
+
+    Greift pro Quelle nur, wenn der LETZTE bekannte Zinsaufwand (yfinance
+    oder SEC; Periodenende max. fcff_zins_max_alter_jahre zurueck) nach
+    Steuer < fcff_zins_unwesentlich_grenze x Start-FCF der Quelle ist UND
+    |ND| / Marktkap. < fcff_zins_nd_mcap_grenze. Dann Aufschlag 0 mit Flag
+    zins_unwesentlich; Rueckgabe (True, unterstellter nach-Steuer-Betrag
+    konservativ als Maximum). Sonst (False, NaN) -> weiter strikt n/a.
+    Strenge '<': genau an der Grenze greift die Regel NICHT."""
+    nan = float("nan")
+    max_alter = int(dcfg.get("fcff_zins_max_alter_jahre", 4))
+    grenze = float(dcfg.get("fcff_zins_unwesentlich_grenze", 0.05))
+    nd_grenze = float(dcfg.get("fcff_zins_nd_mcap_grenze", 0.10))
+    t_min, t_max, t_norm = _tax_bounds()
+    if not (nd_conv == nd_conv and mcap_value > 0
+            and abs(nd_conv) / mcap_value < nd_grenze):
+        return False, nan
+    # Kandidaten "letzter bekannter Zins": yfinance-Jahre + SEC-FY-Werte
+    kandidaten = []  # (end_date, wert, steuersatz)
+    for fy in sorted(m.years):
+        y = m.years[fy]
+        ie = y.get("interest_expense")
+        fe = (m.fiscal_ends or {}).get(fy)
+        if ie is None or ie.is_na() or not fe:
+            continue
+        try:
+            import datetime as _dt
+            kandidaten.append((_dt.date.fromisoformat(str(fe)[:10]),
+                               abs(float(ie.value)), tax_rate(m, fy)))
+        except ValueError:
+            continue
+    for fy, (sv, _tag) in ((getattr(m, "sec_interest", None) or {}).get("FY") or {}).items():
+        fe = (m.fiscal_ends or {}).get(int(fy))
+        if not fe:
+            continue
+        try:
+            import datetime as _dt
+            kandidaten.append((_dt.date.fromisoformat(str(fe)[:10]),
+                               abs(float(sv)), tax_rate(m, int(fy))))
+        except ValueError:
+            continue
+    schaetzung = nan
+    for p in pending:
+        end = _fcff_quellen_ende(m, p["label"])
+        if end is None:
+            return False, nan
+        treffer = [(d, v, t) for d, v, t in kandidaten
+                   if d <= end and (end - d).days <= max_alter * 366]
+        if not treffer:
+            return False, nan
+        d, v, t = max(treffer, key=lambda x: x[0])
+        if t != t:
+            t = t_norm
+        t = min(max(t, t_min), t_max)
+        nach_steuer = v * (1.0 - t)
+        if not nach_steuer < grenze * p["value"]:
+            return False, nan
+        if nach_steuer > (schaetzung if schaetzung == schaetzung else float("-inf")):
+            schaetzung = nach_steuer
+    return True, schaetzung
 
 
 def compute_dcf(m: TickerMetrics, cfg: dict, fx=None, fcf_mode: str | None = None) -> DcfResult:
@@ -750,6 +867,10 @@ def compute_dcf(m: TickerMetrics, cfg: dict, fx=None, fcf_mode: str | None = Non
     fcf_basis_cfg = str(dcfg.get("fcf_basis", "fcff")).strip().lower()
     if fcf_basis_cfg not in ("fcff", "levered_legacy"):
         fcf_basis_cfg = "fcff"
+    # v72: Zins-Plan/offene Quellen (nur im fcff-Zweig belegt); die
+    # endgueltige Entscheidung laeuft nach der ND-Ermittlung.
+    plan = None
+    zins_pending = []
     # IFRS-Schutz: Ticker MIT Boersen-Suffix (".L", ".DE", ...; US-GAAP hat
     # keins) bleiben auf levered_legacy -- IAS 7 erlaubt Zinszahlungen im
     # Finanzierungs-Cashflow, der Aufschlag koennte doppelt zaehlen.
@@ -759,11 +880,10 @@ def compute_dcf(m: TickerMetrics, cfg: dict, fx=None, fcf_mode: str | None = Non
         result.fcf_basis_flag = "legacy_nonUS"
     else:
         result.fcf_basis_flag = "fcff"
-        adj_start = _fcff_adjust_start(m, start)
-        if adj_start[0] is None:
-            # Zinsaufwand fehlt/NaN: strikt n/a (KEIN stiller Fallback auf
-            # levered). Roh-FCF bleibt zur Transparenz dokumentiert
-            # (fcf_normalized = levered Rohwert), MoS/Szenarien NaN.
+        plan, zins_avg, steuer_normiert = _fcff_adjust_start(m, start)
+        zins_pending = [p for p in (plan or []) if p["adj"] is None] if plan else []
+        if plan is None:
+            # keine Quellen (Sicherheit) -- wie v70: n/a
             result.fcff_status = "zinsaufwand_fehlend"
             result.fcf_le0 = (start["fcf"] <= 0
                               if start["fcf"] == start["fcf"] else False)
@@ -771,8 +891,20 @@ def compute_dcf(m: TickerMetrics, cfg: dict, fx=None, fcf_mode: str | None = Non
             result.fcf_years_used = start["years_used"]
             result.fcf_sources = start["sources"]
             return result
-        start, result.fcff_interest_added, result.fcff_steuersatz_normiert = adj_start
-        result.fcff_status = "ok"
+        if not zins_pending:
+            # alle Quellen mit Zinsaufwand: wie v70 finalisieren
+            result.fcff_interest_sources = [f"{p['label']}:{p['quelle']}" for p in plan]
+            result.fcff_interest_added = zins_avg
+            result.fcff_steuersatz_normiert = steuer_normiert
+            start = _start_from_plan(start, plan)
+            result.fcff_status = "ok"
+        else:
+            # v72: Quellen offen markiert (Zins fehlt auch beim SEC). Der
+            # Rohstart laeuft VORLAEUFIG weiter (FX-Konvertierung/ND werden
+            # ohnehin benoetigt); die endgueltige Entscheidung trifft nach
+            # der ND-Ermittlung (Wesentlichkeitsregel braucht ND/Marktkap.):
+            # Regel greift -> Aufschlag 0 + Flag; sonst strikt n/a wie v70.
+            result.fcff_steuersatz_normiert = steuer_normiert
     result.sbc_missing = bool(start.get("sbc_missing", False))
     result.fcf_le0 = (start["fcf"] <= 0) if start["fcf"] == start["fcf"] else False
     result.fcf_normalized = start["fcf"]
@@ -893,6 +1025,48 @@ def compute_dcf(m: TickerMetrics, cfg: dict, fx=None, fcf_mode: str | None = Non
             nd_alt_conv = converter.convert_stock(nd_alt, nd_alt_cur, mcap.currency,
                                                   nd_alt_asof)
     result.net_debt_conv = nd_conv
+
+    # v72: nachgeholte Zinsentscheidung fuer offen markierte Quellen
+    # (ND/Marktkap. stehen jetzt bereit; Reihenfolge ansonsten unveraendert)
+    if plan is not None and zins_pending:
+        ok_wesentlich, schaetzung = _zins_unwesentlich(m, dcfg, zins_pending,
+                                                       nd_conv, mcap.value)
+        if not ok_wesentlich:
+            # Zinsaufwand auch nach SEC unbedeutend-unbekannt: strikt n/a
+            # (KEIN stiller Fallback auf levered). Roh-FCF bleibt zur
+            # Transparenz dokumentiert, MoS/Szenarien NaN -- exakt wie v70.
+            result.fcff_status = "zinsaufwand_fehlend"
+            result.fcf_le0 = (start["fcf"] <= 0
+                              if start["fcf"] == start["fcf"] else False)
+            result.fcf_normalized = start["fcf"]
+            result.fcf_years_used = start["years_used"]
+            result.fcf_sources = start["sources"]
+            return result
+        # Wesentlichkeitsregel greift: Aufschlag 0 fuer die offenen Quellen
+        # (Flag zins_unwesentlich; Wert eher unterschaetzt = konservativ)
+        for p in plan:
+            if p["adj"] is None:
+                p["adj"] = 0.0
+                p["quelle"] = "unwesentlich"
+        adj_vals = [p["adj"] for p in plan]
+        result.fcff_interest_sources = [f"{p['label']}:{p['quelle']}" for p in plan]
+        result.fcff_interest_added = sum(adj_vals) / len(adj_vals)
+        result.fcff_zins_schaetzung = schaetzung
+        start = _start_from_plan(start, plan)
+        result.fcff_status = "ok"
+        result.fcf_normalized = start["fcf"]
+        result.fcf_sources = start["sources"]
+        result.fcf_le0 = (start["fcf"] <= 0) if start["fcf"] == start["fcf"] else False
+        # Quellen wurden veraendert -> FX-Konvertierung mit finalen Werten
+        # wiederholen (dieselbe Funktion/Stichtage, nur die Quellwerte sind
+        # jetzt FCFF-final)
+        fcf_conv, fcf_fx_status, fcf_window_basis = _convert_fcf_sources(
+            m, start, converter, mcap.currency)
+        result.fcf_fx_status = fcf_fx_status
+        result.fcf_window_basis = fcf_window_basis
+        if math.isnan(fcf_conv):
+            return result
+        result.fcf_normalized_conv = fcf_conv
 
     # v66: Status der Nettoverschuldung -- bekannt (inkl. exakt 0) vs.
     # unbekannt vs. unvollstaendig vs. FX-Konvertierung fehlgeschlagen.

@@ -2051,6 +2051,18 @@ def main() -> None:
     st.title(":material/trending_up: Value-Screener")
     st.caption("Qualitaets- und Bewertungs-Screening (Buffett-Ansatz) – Einheiten konsistent in absoluten Betraegen")
 
+    # v72: SEC-User-Agent einmal beim Prozessstart pruefen (Umgebungsvariable
+    # SEC_USER_AGENT, klarer RuntimeError VOR dem ersten SEC-Request; die
+    # Seiten 1-4 starten den Live-Screener mit SEC-Abgleich)
+    try:
+        from config import load_config as _load_cfg_v72
+        if _load_cfg_v72().get("sec", {}).get("enabled", True):
+            from data.sec import validate_user_agent
+            validate_user_agent()
+    except RuntimeError as _ua_exc:
+        st.error(f"Konfiguration unvollstaendig: {_ua_exc}")
+        st.stop()
+
     # v58: Live-Lauf (get_companies + evaluate_all) startet nicht mehr hier auf jeder
     # Seite -- nur noch in den Seiten 1-4 via ensure_screener_data(). Seite 5
     # (Watchlist Live) liest ausschliesslich value_tracker.db.

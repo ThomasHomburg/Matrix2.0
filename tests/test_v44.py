@@ -13,6 +13,7 @@
 """
 
 import json
+import os
 from pathlib import Path
 import urllib.error
 import urllib.request
@@ -24,7 +25,7 @@ from config import load_config
 import smart_money
 
 
-VALID_UA = "Tom Homburg t09homburg@gmail.com"  # sec.user_agent aus uebernommener config.yaml
+VALID_UA = "Tom Homburg t09homburg@gmail.com"  # echter Kontakt (v72: via SEC_USER_AGENT)
 
 
 def _cfg(**sm_over):
@@ -64,31 +65,34 @@ def test_gueltiger_user_agent_aus_smart_money():
     assert smart_money.user_agent_from_cfg(cfg) == VALID_UA
 
 
-def test_user_agent_fallback_auf_sec():
+def test_user_agent_fallback_auf_umgebung(monkeypatch):
+    """v72: ohne smart_money.user_agent greift die Umgebungsvariable
+    SEC_USER_AGENT (data.sec.user_agent). Vorher: Fallback sec.user_agent."""
     cfg = _cfg()
     cfg["smart_money"]["user_agent"] = ""
-    cfg["sec"]["user_agent"] = VALID_UA
+    cfg["sec"].pop("user_agent", None)
+    cfg["sec"]["enabled"] = True   # echte SEC-Nutzung -> Umgebungsvariable
+    monkeypatch.setenv("SEC_USER_AGENT", VALID_UA)
     assert smart_money.user_agent_from_cfg(cfg) == VALID_UA
 
 
-def test_config_ua_eingetragen():
-    """config.yaml traegt den echten Kontakt (sec + smart_money).
-
-    Liest die Datei direkt (load_config ist lru_cache -- andere Tests duerfen
-    den Cache vorher mit mutiertem Dict gefuellt haben).
-    """
+def test_config_ua_nicht_mehr_in_config(monkeypatch):
+    """v72: sec.user_agent ist KOMPLETT aus config.yaml entfernt -- der
+    User-Agent kommt ausschliesslich aus der Umgebungsvariable
+    SEC_USER_AGENT (inkl. Validierung). Vorher: config traegt den echten
+    Kontakt als sec.user_agent, smart_money faellt darauf zurueck."""
     import yaml
     raw = yaml.safe_load(Path("config.yaml").read_text(encoding="utf-8"))
-    # user hat die Datei uebernommen: sec.user_agent ist die Quelle
-    # (smart_money.user_agent optional; Fallback auf sec.user_agent in user_agent_from_cfg)
-    ua_sec = raw["sec"].get("user_agent")
-    assert ua_sec and "@" in ua_sec and "example" not in ua_sec.lower() and "test" not in ua_sec.lower()
-    assert ua_sec == "Tom Homburg t09homburg@gmail.com"
-    # Fallback-Verhalten: ohne smart_money.user_agent greift sec.user_agent
+    # KEIN Config-Eintrag mehr (kein versehentlicher Commit des Kontakts)
+    assert "user_agent" not in (raw.get("sec") or {})
+    # Fallback ohne smart_money.user_agent -> Umgebungsvariable (Mock-Umgebung)
     cfg = load_config()
     cfg2 = dict(cfg)
     cfg2["smart_money"] = {k: v for k, v in cfg["smart_money"].items() if k != "user_agent"}
-    assert smart_money.user_agent_from_cfg(cfg2) == "Tom Homburg t09homburg@gmail.com"
+    cfg2["sec"] = dict(cfg2["sec"])
+    cfg2["sec"]["enabled"] = True   # echte SEC-Nutzung -> Umgebungsvariable
+    monkeypatch.setenv("SEC_USER_AGENT", VALID_UA)
+    assert smart_money.user_agent_from_cfg(cfg2) == VALID_UA
 
 
 # --------------------------------------------------------------------------

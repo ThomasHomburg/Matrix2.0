@@ -347,6 +347,15 @@ dcf:
                               # automatisch auf levered_legacy (Flag
                               # fcf_basis:legacy_nonUS); fehlender Schalter
                               # = fcff.
+  # v72 Zinsaufwand-Zweitquelle: Wesentlichkeitsregel fuer Quellen OHNE
+  # jede Zinszahl (yfinance UND SEC liefern nichts, z. B. AAPL ab FY2024):
+  # nur wenn der letzte bekannte Zinsaufwand (max. fcff_zins_max_alter_jahre
+  # alt) nach Steuer < fcff_zins_unwesentlich_grenze des Start-FCF der
+  # Quelle ist UND |ND|/Marktkap. < fcff_zins_nd_mcap_grenze: Aufschlag 0
+  # mit Flag zins_unwesentlich (konservativ: Wert eher unterschaetzt).
+  fcff_zins_max_alter_jahre: 4
+  fcff_zins_unwesentlich_grenze: 0.05
+  fcff_zins_nd_mcap_grenze: 0.10
   net_debt_mode: reported    ## Nettoverschuldung: reported (gemeldet) |
                               # incl_sti (Schulden - (Cash + kurzfr. Anlagen))
   mos_min_mode: min          ## Kandidatenregel MoS: min (Minimum der 4 Startwert-MoS)
@@ -366,10 +375,14 @@ dcf:
                                     # obwohl das Minimum < 30 % (Quality >= 60)
 
 sec:
-  # SEC-EDGAR-Abgleich (kostenlos, data.sec.gov). User-Agent MIT E-Mail als
-  # Platzhalter -- vor Produktivbetrieb eigene E-Mail eintragen (SEC-Policy).
-  user_agent: "Tom Homburg t09homburg@gmail.com"
+  # SEC-EDGAR-Abgleich (kostenlos, data.sec.gov). User-Agent MIT E-Mail --
+  # v72: ausschliesslich aus der Umgebungsvariable SEC_USER_AGENT (Pflicht,
+  # beim Prozessstart geprueft; siehe README). KEIN Eintrag mehr hier.
   enabled: true              ## false = Abgleich deaktivieren
+  # v72 Cache fuer companyfacts (je CIK eine JSON-Datei; in .gitignore)
+  cache_dir: "logs/sec_cache"  ## leer = kein Datei-Cache (nur Memory)
+  cache_ttl_hours: 24          ## Cache-Eintrag aelter als TTL -> Neuladen
+  cache_frozen: false         ## true (Tests/Abnahme): nur Cache lesen, nie abrufen
   tolerance: 0.05            ## Flag "Quellen weichen ab" ab > 5 % Abweichung je Jahr
   max_requests_per_second: 5 ## v32: Rate-Limit gegen data.sec.gov (SEC-Policy: max. 10/s,
                               # wir bleiben bei 5/s; Mindestabstand 1/5 s zwischen Requests)
@@ -455,7 +468,7 @@ decisions:
 
 # Ein-Kommando-Quartalslauf (quartalslauf.py run)
 quartalslauf:
-  version: 70                                  ## v{version} in der Ausgabedatei
+  version: 72                                  ## v{version} in der Ausgabedatei
   db: "value_tracker.db"
   tickers_csv: "tickers_sp500.csv"             ## Universum fuer run_ranking.py
   watch_csv: "ticker_watch_v40.csv"            ## Watchlist fuer overlap/live_update

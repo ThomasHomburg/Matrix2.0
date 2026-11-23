@@ -15,3 +15,7 @@ rationale_worklist.csv
 sec_test.py
 debug_fetch*.py
 logs/
+
+# v72: SEC-companyfacts-Cache (je CIK) und Zins-Abweichungs-CSV (nur Diagnose)
+logs/sec_cache/
+tools/v72_zins_abweichungen.csv

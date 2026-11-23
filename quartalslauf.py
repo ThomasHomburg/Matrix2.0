@@ -301,6 +301,12 @@ def _parse_args(argv):
 
 def main() -> None:
     args = _parse_args(sys.argv[1:])
+    # v72: SEC-User-Agent einmal beim Prozessstart pruefen (Umgebungsvariable
+    # SEC_USER_AGENT, klarer RuntimeError VOR dem ersten SEC-Request)
+    from config import load_config
+    if load_config().get("sec", {}).get("enabled", True):
+        from data.sec import validate_user_agent
+        validate_user_agent()
     if args.cmd == "run":
         try:
             rc = run(dry_run=args.dry_run, quartal=args.quartal)
