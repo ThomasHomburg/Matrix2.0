@@ -356,6 +356,11 @@ dcf:
   fcff_zins_max_alter_jahre: 4
   fcff_zins_unwesentlich_grenze: 0.05
   fcff_zins_nd_mcap_grenze: 0.10
+  # v73: impliziter IRR (Diskontsatz auf EV-Basis, Base-Szenario, Bisektion)
+  irr_untergrenze_offset: 0.001   ## Untergrenze = terminal_growth + offset
+  irr_obergrenze: 0.40            ## Obergrenze des Suchintervalls
+  irr_max_iterationen: 60         ## Bisektionsschritte
+  irr_toleranz: 1.0e-6            ## Abbruch bei |vps - kurs| < toleranz x kurs
   net_debt_mode: reported    ## Nettoverschuldung: reported (gemeldet) |
                               # incl_sti (Schulden - (Cash + kurzfr. Anlagen))
   mos_min_mode: min          ## Kandidatenregel MoS: min (Minimum der 4 Startwert-MoS)
@@ -462,6 +467,16 @@ decisions:
       smart_money_score: 1        ## nur Ticker ohne Fondsaktivitaet (keine Kaeufer/Verkaeufer)
       max_ticker: 15
       seed: 42                    ## fester Seed -> reproduzierbarer Zufallskorb
+    # v73 relativer Korb: Top-Ticker nach implizitem IRR (Diskontsatz auf
+    # EV-Basis, FCFF, ND abgezogen) + gleichgrosser Zufallskontrollkorb aus
+    # DEMSELBEN Pool. Pool/Regeln sind mit docs/hypothesen_2026-11-20.md
+    # eingefroren (H4).
+    irr_top:
+      quality_min: 60
+      max_ticker: 20        ## Obergrenze; Korbgroesse = min(max_ticker, Pool//2)
+      max_pro_sektor: 4     ## Sektor-Konzentration begrenzen (yfinance 'sector')
+      min_pool: 16          ## Pool < min_pool -> gar keine irr-Koerbe (kein stiller Fallback)
+      seed: 42              ## irr_kontrolle: Zufallsauswahl aus Pool ohne Top
     benchmark: [SPY, RSP]         ## SPY = Referenz, RSP = gleichgewichtet
   horizonte_monate: [3, 6, 12, 24]  ## Review-Horizonte (30 Tage/Monat)
   review_csv: "decisions_review.csv"

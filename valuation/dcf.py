@@ -1283,3 +1283,99 @@ def is_buy_candidate(quality: float, dcf: DcfResult, current_price: float, cfg: 
         return False
     floor = float(dcfg.get("buy_bear_floor", 0.80))
     return bear.value_per_share >= floor * current_price
+
+
+# --- v73: impliziter IRR (Diskontsatz auf EV-Basis, FCFF, ND abgezogen) ---
+
+def implied_irr(m: TickerMetrics, cfg: dict, mode: str | None = None, fx=None,
+               base: DcfResult | None = None) -> "tuple[float, str]":
+    """Impliziter IRR = Diskontsatz r, bei dem der Wert je Aktie des
+    Base-Szenarios dem Kurs entspricht (vps(r) = Kurs).
+
+    BENENNUNG (v73): Das ist der implizite Diskontsatz auf EV-Basis
+    (FCFF, Nettoverschuldung abgezogen) -- KEINE Eigenkapitalrendite
+    eines Anlegers (Dividenden/Rueckkaeufe sind nicht enthalten).
+
+    Methodik (keine duplizierte Logik):
+    - Basiswerte (Start-FCF je Modus inkl. FCFF-Aufschlag/FX, ND-Abzug,
+      Aktienbasis, Base-Wachstum) stammen aus compute_dcf(m, cfg,
+      fcf_mode=mode) -- uebernimmt `base`, wenn der Aufrufer das
+      Modus-Ergebnis bereits berechnet hat (Pipeline: Wiederverwendung).
+    - Bisektion auf f(r) = value_per_share(r) - Kurs (NICHT auf die
+      MoS-Formel; Vorzeichenproblem aus der v71-Diagnose vermeiden),
+      je Iteration ueber _dcf_scenario mit identischem Wachstumspfad.
+    - Intervall [terminal_growth + dcf.irr_untergrenze_offset,
+      dcf.irr_obergrenze]. Keine Wurzel: NaN mit Grund, NIE 0:
+      f(obergrenze) > 0 -> r liegt ueber der Obergrenze -> "irr>40%";
+      f(untergrenze) < 0 -> r liegt unter der Untergrenze ->
+      "irr<untergrenze".
+    Rueckgabe (irr | NaN, grund: "" wenn gefunden)."""
+    nan = float("nan")
+    dcfg = cfg["dcf"]
+    base_res = base if base is not None else compute_dcf(m, cfg, fx=fx,
+                                                         fcf_mode=mode)
+    mcap = m.market_cap
+    if (base_res is None or mcap is None or mcap.is_na() or mcap.value <= 0
+            or base_res.fcf_normalized_conv != base_res.fcf_normalized_conv
+            or base_res.net_debt_conv != base_res.net_debt_conv):
+        return nan, "basis_n/a"
+    shares = base_res.shares_current if (base_res.shares_current ==
+                                         base_res.shares_current
+                                         and base_res.shares_current > 0) \
+        else nan
+    if shares != shares:
+        return nan, "basis_n/a"
+    # Kurs: derselbe Preisbegriff wie compute_dcf/sensitivity (v67)
+    if (str(dcfg.get("share_basis", "current")).lower() == "current"
+            and base_res.kurs_boerse == base_res.kurs_boerse
+            and base_res.kurs_boerse > 0):
+        price = base_res.kurs_boerse
+    else:
+        price = mcap.value / shares
+    if price != price or price <= 0:
+        return nan, "basis_n/a"
+    # Base-Wachstum identisch zu compute_dcf / sensitivity_mos_base
+    cagr = base_res.revenue_cagr
+    base_cap = float(dcfg.get("base_growth_cap", 0.06))
+    g5 = 0.0 if cagr != cagr else min(cagr, base_cap)
+    g_t = base_res.terminal_growth
+    fcf_conv = base_res.fcf_normalized_conv
+    nd_conv = base_res.net_debt_conv
+    offset = float(dcfg.get("irr_untergrenze_offset", 0.001))
+    oberg = float(dcfg.get("irr_obergrenze", 0.40))
+    max_iter = int(dcfg.get("irr_max_iterationen", 60))
+    toleranz = float(dcfg.get("irr_toleranz", 1e-6))
+    lo, hi = g_t + offset, oberg
+
+    def f(r: float) -> float:
+        sc = _dcf_scenario("base", g5, g_t, r, fcf_conv, shares, dcfg,
+                           net_debt=nd_conv)
+        return (sc.value_per_share - price) if sc.value_per_share == \
+            sc.value_per_share else nan
+
+    f_hi = f(hi)
+    if f_hi != f_hi:
+        return nan, "basis_n/a"
+    if f_hi > 0:
+        # selbst bei 40 % Diskont ist der innere Wert ueber dem Kurs
+        # -> der gesuchte r liegt OBERHALB des Intervalls
+        return nan, "irr>40%"
+    f_lo = f(lo)
+    if f_lo != f_lo:
+        return nan, "basis_n/a"
+    if f_lo < 0:
+        # bereits an der Untergrenze (terminal_growth + offset) ist der
+        # innere Wert UNTER dem Kurs -> r liegt unterhalb des Intervalls
+        return nan, "irr<untergrenze"
+    for _ in range(max_iter):
+        mid = (lo + hi) / 2.0
+        fm = f(mid)
+        if fm != fm:
+            fm = -1.0   # jenseits der Wurzel nicht definiert -> weiter nach oben
+        elif abs(fm) < toleranz * price:
+            return mid, ""
+        if fm > 0:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2.0, ""
