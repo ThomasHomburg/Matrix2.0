@@ -146,15 +146,35 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict, fx=None) -> dict:
     # bei Sektor-Sonderregel kein DCF -> alle MoS NaN ("n/a (Sonderregel)")
     mos_by_mode = {}
     vps_by_mode = {}  # Wert je Aktie (Base) je Startwert-Modus (iv_* im Export)
+    dcf_by_mode = {}    # v73: Modus-Ergebnisse fuer implied_irr (Wiederverwendung)
     for mode in ("avg3", "latest", "ttm", "ttm_only"):
         if special:
             mos_by_mode[mode] = float("nan")
             vps_by_mode[mode] = float("nan")
         else:
             dcf_m = compute_dcf(m, cfg, fx=fx, fcf_mode=mode)
+            dcf_by_mode[mode] = dcf_m
             mos_by_mode[mode] = dcf_m.margin_of_safety
             _b = dcf_m.scenarios.get("base")
             vps_by_mode[mode] = _b.value_per_share if _b is not None else float("nan")
+    # v73: impliziter IRR (Diskontsatz auf EV-Basis, FCFF, ND abgezogen;
+    # KEINE Eigenkapitalrendite) je Startwert-Modus, Wiederverwendung der
+    # Modus-Ergebnisse aus der Schleife oben (kein zweiter compute_dcf-Lauf)
+    irr_by_mode = {}
+    irr_grund_by_mode = {}
+    if special:
+        for _mode in ("avg3", "latest", "ttm", "ttm_only", "auto"):
+            irr_by_mode[_mode] = float("nan")
+            irr_grund_by_mode[_mode] = "basis_n/a"
+    else:
+        from valuation.dcf import implied_irr
+        for _mode in ("avg3", "latest", "ttm", "ttm_only", "auto"):
+            # Basis wiederverwenden: auto -> Haupt-dcf, sonst Modus-dcf aus
+            # der Schleife oben (kein zusaetzlicher compute_dcf-Lauf je Modus)
+            _base = dcf if _mode == "auto" else dcf_by_mode.get(_mode)
+            _irr, _grund = implied_irr(m, cfg, mode=_mode, fx=fx, base=_base)
+            irr_by_mode[_mode] = _irr
+            irr_grund_by_mode[_mode] = _grund
     mos_avg3 = mos_by_mode.get("avg3", float("nan"))
     mos_latest = mos_by_mode.get("latest", float("nan"))
     mos_ttm = mos_by_mode.get("ttm", float("nan"))
@@ -750,6 +770,14 @@ def evaluate_ticker(m: TickerMetrics, cfg: dict, fx=None) -> dict:
         "mos_latest": mos_latest,
         "mos_ttm": mos_ttm,
         "mos_ttm_only": mos_ttm_only,
+        # v73: impliziter IRR (Diskontsatz auf EV-Basis; Funktion implied_irr)
+        "irr_auto": irr_by_mode.get("auto", float("nan")),
+        "irr_avg3": irr_by_mode.get("avg3", float("nan")),
+        "irr_latest": irr_by_mode.get("latest", float("nan")),
+        "irr_ttm": irr_by_mode.get("ttm", float("nan")),
+        "irr_ttm_only": irr_by_mode.get("ttm_only", float("nan")),
+        "irr_grund": ";".join(f"{_m}:{_g}" for _m, _g in sorted(
+            irr_grund_by_mode.items()) if _g) or "",
         "mos_rule": mos_rule,          # fuer Kandidatenregel verwendetes MoS (config mos_min_mode)
         "mos_rule_mode": mos_mode,
         # Zwei Stufen -- Kandidat / Beobachtung (+ Detail, welcher Modus entscheidet)

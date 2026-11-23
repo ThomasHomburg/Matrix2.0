@@ -111,8 +111,12 @@ def validate_user_agent() -> str:
     return user_agent()
 
 
-# v72 Cache: companyfacts je CIK (in-memory + Datei in sec.cache_dir)
-_FACTS_MEM_CACHE: dict[str, tuple[str, dict]] = {}  # cik -> (fetched_at, facts)
+# v72/v73 Cache: companyfacts NUR im Datei-Cache (sec.cache_dir), NICHT
+# dauerhaft im Prozessspeicher -- die companyfacts-Antworten sind 1-50 MB
+# gross (volle XBRL-Historie), ein Memory-Cache fuer 500 Ticker sprengt
+# die RAM-Grenze (beobachtet: deterministischer OOM-Kill ~230 Ticker).
+# _FACTS_MEM_CACHE bleibt als leere Struktur fuer die Test-Kompatibilitaet.
+_FACTS_MEM_CACHE: dict[str, tuple[str, dict]] = {}
 
 
 def _cache_settings(cfg: dict) -> tuple[str, float, bool]:
@@ -165,19 +169,9 @@ def fetch_companyfacts_cached(cik: str, cfg: dict) -> tuple[dict | None, bool]:
     if not cik:
         return None, False
     cache_dir, ttl_h, frozen = _cache_settings(cfg)
-    # Memory-Cache
-    if cik in _FACTS_MEM_CACHE:
-        fetched_at, facts = _FACTS_MEM_CACHE[cik]
-        try:
-            age_h = (datetime.now() - datetime.fromisoformat(fetched_at)).total_seconds() / 3600.0
-        except ValueError:
-            age_h = math.inf
-        if frozen or age_h <= ttl_h:
-            return facts, True
     if cache_dir:
         facts, hit = _facts_from_file(cache_dir, cik, ttl_h, frozen)
         if hit:
-            _FACTS_MEM_CACHE[cik] = (datetime.now().isoformat(timespec="seconds"), facts)
             return facts, True
     if frozen:  # frozen ohne Cache-Treffer: kein Abruf
         return None, False
@@ -185,7 +179,6 @@ def fetch_companyfacts_cached(cik: str, cfg: dict) -> tuple[dict | None, bool]:
     facts = _fetch_companyfacts(cik, ua)
     if facts is not None:
         fetched_at = datetime.now().isoformat(timespec="seconds")
-        _FACTS_MEM_CACHE[cik] = (fetched_at, facts)
         if cache_dir:
             try:
                 import os as _os

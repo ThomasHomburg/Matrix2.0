@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import logging
 import random
 import sqlite3
 import statistics
@@ -73,7 +74,8 @@ DECISIONS_KORB_SPALTEN = (
     ("start_datum", "TEXT"),   # v56 Look-ahead: max(Snapshot-Datum, juengstes filing_datum verwendeter 13F)
 )
 
-KORB_NAMEN = ("screener", "divergenz", "kontrolle", "benchmark")
+KORB_NAMEN = ("screener", "divergenz", "kontrolle", "benchmark",
+               "irr_top", "irr_kontrolle")   # v73: relative IRR-Koerbe (H4)
 
 
 def _migrate_decisions(con: sqlite3.Connection) -> None:
@@ -314,6 +316,9 @@ def koerbe(cfg: dict, rows: list[dict]) -> dict[str, list[dict]]:
     pick = random.Random(seed).sample(cands, min(k_max, len(cands))) if cands else []
     by_t = {r["ticker"]: r for r in rows}
     out["kontrolle"] = [by_t[t] for t in pick]
+
+    # v73: relative IRR-Koerbe
+    _irr_koerbe(b, rows, out, logging.getLogger(__name__))
 
     out["benchmark"] = [by_t[t] for t in (b.get("benchmark") or ["SPY", "RSP"])
                         if t in by_t]
@@ -690,8 +695,8 @@ def _snapshot_koerbe(args, cfg: dict, con: sqlite3.Connection) -> None:
                     timing_status, smart_money_score, urteil, divergenz_stufe,
                     fonds_kaeufer, fonds_verkaeufer,
                     gew_bear, gew_base, gew_bull, erwartungswert_pct, wahrscheinlichkeit_p,
-                    start_datum, horizont_monate, thesis, break_condition)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    start_datum, horizont_monate, thesis, break_condition, irr_auto)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (t, datum, "auto", name, kurs, kurs_datum, _status(r),
                  _f(r, "quality"), _f(r, "mos_min", "mos_rule", "margin_of_safety"),
                  _f(r, "mos_robust"), _f(r, "iv_base"), _f(r, "iv_bear"), _f(r, "iv_bull"),
@@ -702,7 +707,10 @@ def _snapshot_koerbe(args, cfg: dict, con: sqlite3.Connection) -> None:
                  str(r.get("fonds_kaeufer") or ""), str(r.get("fonds_verkaeufer") or ""),
                  gew["bear"], gew["base"], gew["bull"], ew,
                  (ew / 100.0 if ew == ew else None),
-                 start_datum, 12, f"auto-Snapshot Korb {name}", ""))
+                 start_datum, 12, f"auto-Snapshot Korb {name}", "",
+                 (_f(r, "irr_auto") if _f(r, "irr_auto") == _f(r, "irr_auto")
+                  else None)))
+
             w += 1
         print(f"Korb {name}: {w} geschrieben, {s} bereits vorhanden (datum={datum}).")
         total_w += w
@@ -976,3 +984,103 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# -------------------------------------------------------------------------- #
+# v73: relative IRR-Koerbe (irr_top / irr_kontrolle), H4                     #
+# -------------------------------------------------------------------------- #
+
+# Ausschlussgruende in festeingefrorener Reihenfolge (Prio), siehe
+# docs/hypothesen_2026-11-20.md: erst Qualitaet/Status/Flags, dann Datenbasis.
+_IRR_POOL_GRUENDE = ("quality", "status", "mos_extrem", "wert_nahe_null",
+                     "nicht_normalisiert", "legacy_nonUS", "fcff_status",
+                     "kein_irr", "sektor_fehlt")
+
+
+def _irr_pool_grund(r: dict, q_min: float) -> str:
+    """Ersten Ausschlussgrund einer Zeile nach der festen Prioritaet;
+    "" wenn die Zeile in den Pool passt. (Reihenfolge eingefroren.)"""
+    q = _f(r, "quality")
+    if q != q or q < q_min:
+        return "quality"
+    st = _status(r)
+    if st.startswith("Pruefen") or st.startswith("Sonderregel"):
+        return "status"
+    flags = str(r.get("flags") or "").lower()
+    if "mos:extrem" in flags:
+        return "mos_extrem"
+    if "wert:nahe_null" in flags:
+        return "wert_nahe_null"
+    if "nicht normalisiert" in flags:
+        return "nicht_normalisiert"   # 4-J-FCF kann Zykliker-Hochpunkt sein
+    if "fcf_basis:legacy_nonus" in flags:
+        return "legacy_nonUS"        # Suffix-Ticker nicht vergleichbar
+    if str(r.get("dcf_fcff_status") or "") != "ok":
+        return "fcff_status"
+    irr = _f(r, "irr_auto")
+    if irr != irr:
+        return "kein_irr"
+    if not str(r.get("sector") or "").strip():
+        return "sektor_fehlt"        # Sektorcap braucht yfinance 'sector'
+    return ""
+
+
+def irr_pool_stats(cfg: dict, rows: list[dict]) -> "tuple[list[dict], dict, dict[str, str]]":
+    """Pool fuer die IRR-Koerbe: (pool_zeilen, ausschluss_counter, grund_je_ticker).
+    Reine Auswertung (fuer Abnahme/Diagnose), keine Seiteneffekte."""
+    it = cfg.get("decisions", {}).get("baskets", {}).get("irr_top", {}) or {}
+    q_min = float(it.get("quality_min", 60))
+    pool, grund_je_t = [], {}
+    from collections import Counter
+    ausschluss = Counter()
+    for r in rows:
+        g = _irr_pool_grund(r, q_min)
+        if g:
+            ausschluss[g] += 1
+            grund_je_t[str(r.get("ticker") or "")] = g
+        else:
+            pool.append(r)
+    return pool, dict(ausschluss), grund_je_t
+
+
+def _irr_koerbe(b: dict, rows: list[dict], out: dict, logger) -> None:
+    """irr_top (Top-N nach irr_auto, Sektorcap) + irr_kontrolle (gleich
+    grosser Zufallskorb seed 42 aus demselben Pool ohne die Top-Ticker).
+    Pool < min_pool -> GAR KEINE irr-Koerbe (kein stiller Fallback)."""
+    it = b.get("irr_top", {}) or {}
+    q_min = float(it.get("quality_min", 60))
+    max_t = int(it.get("max_ticker", 20))
+    max_sek = int(it.get("max_pro_sektor", 4))
+    min_pool = int(it.get("min_pool", 16))
+    seed = int(it.get("seed", 42))
+    pool, ausschluss, grund_je_t = irr_pool_stats(
+        {"decisions": {"baskets": {"irr_top": it}}}, rows)
+    if len(pool) < min_pool:
+        logger.warning("irr-Koerbe nicht gebildet: Pool zu klein (n=%d; Ausschluss %s)",
+                      len(pool), ausschluss or "-")
+        out["irr_top"] = []
+        out["irr_kontrolle"] = []
+        return
+    # deterministische Reihenfolge: irr_auto absteigend, bei Gleichstand
+    # Ticker alphabetisch
+    pool_sorted = sorted(pool, key=lambda r: (-_f(r, "irr_auto"), str(r["ticker"])))
+    top_n = min(max_t, len(pool) // 2)
+    top, sek = [], {}
+    for r in pool_sorted:
+        if len(top) >= top_n:
+            break
+        sek_name = str(r.get("sector") or "").strip()
+        if sek.get(sek_name, 0) >= max_sek:
+            continue
+        sek[sek_name] = sek.get(sek_name, 0) + 1
+        top.append(r)
+    out["irr_top"] = top
+    top_ts = {str(r["ticker"]) for r in top}
+    rest = sorted(str(r["ticker"]) for r in pool if str(r["ticker"]) not in top_ts)
+    k_n = min(len(top), len(rest))       # Kontrolle gleich gross wie irr_top
+    pick = random.Random(seed).sample(rest, k_n) if k_n > 0 else []
+    by_t = {str(r["ticker"]): r for r in pool}
+    out["irr_kontrolle"] = [by_t[t] for t in pick]
+    logger.info("irr_top: n=%d (Pool %d, Top-N %d, Sektorcap %d); "
+                "irr_kontrolle: n=%d (seed %d)",
+                len(top), len(pool), top_n, max_sek, len(pick), seed)

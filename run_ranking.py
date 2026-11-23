@@ -221,6 +221,11 @@ def _write_ranking_csv(rows: list[dict], excluded: list[dict], errors: list[dict
             "kurs", "kurs_datum", "calc_date",
             "iv_bear", "iv_base", "iv_bull",
             "iv_avg3", "iv_latest", "iv_ttm", "iv_ttm_only", "iv_base_10pct",
+            # v73: impliziter IRR (Diskontsatz auf EV-Basis) je Modus + Hauptmass;
+            # dcf_fcff_status fuer den Korb-Pool (irr_top/irr_kontrolle).
+            # Sektor: bestehende Spalte "sector" (yfinance), KEIN Duplikat "sektor".
+            "irr_auto", "irr_avg3", "irr_latest", "irr_ttm", "irr_ttm_only",
+            "irr_grund", "dcf_fcff_status",
             "naechster_earnings"]
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)

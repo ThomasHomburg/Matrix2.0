@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS valuations (
     quelle_csv      TEXT,                      -- ranking CSV, aus der der Snapshot stammt
     aktien_aktuell  REAL,                      -- v62 Aktienbasis-Fix (Altbestand)
     iv_aktuell      REAL,                      -- v62: iv_base * kurs_boerse / kurs_marktkap_basis
+    irr_auto        REAL,                      -- v73: impliziter IRR (Diskontsatz EV-Basis)
     PRIMARY KEY (ticker, calc_date)
 );
 CREATE INDEX IF NOT EXISTS idx_valuations_calc ON valuations (calc_date);
@@ -110,6 +111,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     start_datum     TEXT,                       -- v56 Look-ahead: Startdatum der Rendite je Zeile =
                                                 -- max(Snapshot-Datum, juengstes filing_datum der verwendeten 13F)
     aktien_aktuell  REAL,                       -- v62 Aktienbasis-Fix (Altbestand): umgerechnete aktien_aktuell
+    irr_auto        REAL,                       -- v73: impliziter IRR (Diskontsatz EV-Basis)
     iv_aktuell      REAL,                       -- v62: iv_base * kurs_boerse / kurs_marktkap_basis
     flags           TEXT,                       -- v62: z. B. "umgerechnet"
     hinweis         TEXT                        -- v62: z. B. Aktienbasis-Fix-Hinweis fuer datum share_basis_fix.datum
