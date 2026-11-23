@@ -36,6 +36,7 @@ review: fuellt fuer Eintraege aelter als 12/24 Monate den Kurs nach (aus prices
 from __future__ import annotations
 
 import argparse
+import collections
 import csv
 import math
 import logging
@@ -75,7 +76,7 @@ DECISIONS_KORB_SPALTEN = (
 )
 
 KORB_NAMEN = ("screener", "divergenz", "kontrolle", "benchmark",
-               "irr_top", "irr_kontrolle")   # v73: relative IRR-Koerbe (H4)
+               "irr_top", "irr_kontrolle", "irr_pool")   # v73/v73b IRR-Koerbe (H4)
 
 
 def _migrate_decisions(con: sqlite3.Connection) -> None:
@@ -804,10 +805,14 @@ def _korb_review(con: sqlite3.Connection, cfg: dict, heute: date,
     for o in out:
         k_med = med.get(("kontrolle", o["datum"], o["horizont_monate"]))
         o["median_diff_kontrolle_pct"] = (o["median_pct"] - k_med) if k_med is not None else None
+        # v73b: Differenz Median zu irr_pool (Basislinie; fuer Korb irr_top
+        # ist das die Kennzahl "Differenz Median irr_top vs irr_pool")
+        p_med = med.get(("irr_pool", o["datum"], o["horizont_monate"]))
+        o["median_diff_irr_pool_pct"] = (o["median_pct"] - p_med) if p_med is not None else None
 
     cols = ["korb", "datum", "horizont_monate", "n", "mittelwert_pct", "median_pct",
             "anteil_ueber_spy", "median_ueberrendite_spy_pct", "median_diff_kontrolle_pct",
-            "brier_mean", "kalibrierung"]
+            "median_diff_irr_pool_pct", "brier_mean", "kalibrierung"]
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(cols)
@@ -818,14 +823,17 @@ def _korb_review(con: sqlite3.Connection, cfg: dict, heute: date,
 
     print(f"\n=== Korb-Review {heute.isoformat()} (Horizonte {horizonte}) -> {out_path} ===")
     print(f"{'korb':<11} {'datum':<10} {'hor':>4} {'n':>4} {'mittel%':>8} {'median%':>8} "
-          f"{'>SPY':>6} {'medUeSPY%':>9} {'dKontrolle%':>11} {'brier':>7}  kalibrierung")
+          f"{'>SPY':>6} {'medUeSPY%':>9} {'dKontrolle%':>11} {'dPool%':>8} "
+          f"{'brier':>7}  kalibrierung")
     for o in out:
         def _p(x, spec=">8.1f"):
             return "n/a" if x is None or (isinstance(x, float) and math.isnan(x)) else format(x, spec)
         print(f"{o['korb']:<11} {o['datum']:<10} {o['horizont_monate']:>4} {o['n']:>4} "
               f"{_p(o['mittelwert_pct'])} {_p(o['median_pct'])} "
               f"{_p(o['anteil_ueber_spy'], '>6.2f')} {_p(o['median_ueberrendite_spy_pct'], '>9.1f')} "
-              f"{_p(o['median_diff_kontrolle_pct'], '>11.1f')} {_p(o['brier_mean'], '>7.4f')}  "
+              f"{_p(o['median_diff_kontrolle_pct'], '>11.1f')} "
+              f"{_p(o['median_diff_irr_pool_pct'], '>8.1f')} "
+              f"{_p(o['brier_mean'], '>7.4f')}  "
               f"{o['kalibrierung']}")
     return out
 
@@ -1060,6 +1068,7 @@ def _irr_koerbe(b: dict, rows: list[dict], out: dict, logger) -> None:
                       len(pool), ausschluss or "-")
         out["irr_top"] = []
         out["irr_kontrolle"] = []
+        out["irr_pool"] = []
         return
     # deterministische Reihenfolge: irr_auto absteigend, bei Gleichstand
     # Ticker alphabetisch
@@ -1076,11 +1085,39 @@ def _irr_koerbe(b: dict, rows: list[dict], out: dict, logger) -> None:
         top.append(r)
     out["irr_top"] = top
     top_ts = {str(r["ticker"]) for r in top}
-    rest = sorted(str(r["ticker"]) for r in pool if str(r["ticker"]) not in top_ts)
-    k_n = min(len(top), len(rest))       # Kontrolle gleich gross wie irr_top
-    pick = random.Random(seed).sample(rest, k_n) if k_n > 0 else []
+    pool_sorted_by_t = sorted(pool, key=lambda r: str(r["ticker"]))
+    rest_rows = [r for r in pool_sorted_by_t if str(r["ticker"]) not in top_ts]
     by_t = {str(r["ticker"]): r for r in pool}
-    out["irr_kontrolle"] = [by_t[t] for t in pick]
+    # v73b Basislinie: ALLE Pool-Ticker ohne die Top (gleichgewichtet)
+    out["irr_pool"] = [by_t[str(r["ticker"])] for r in rest_rows]
+    # v73b sektorgematchte Kontrolle: je Sektor so viele Zufallsticker
+    # (seed 42, sortierte Kandidatenliste) wie irr_top aus diesem Sektor
+    # hat; reicht der Sektor nicht, wird mit Zufallstickern aus dem
+    # uebrigen Rest aufgefuellt und das im Log ausgewiesen.
+    rng = random.Random(seed)
+    top_sekt = collections.Counter(
+        str(r.get("sector") or "").strip() for r in top)
+    picked: list[str] = []
+    fehlbedarf = 0
+    for sek_name in sorted(top_sekt):
+        benoetigt = top_sekt[sek_name]
+        kand = [str(r["ticker"]) for r in rest_rows
+                if str(r.get("sector") or "").strip() == sek_name]
+        getroffen = min(benoetigt, len(kand))
+        if getroffen:
+            picked.extend(rng.sample(kand, getroffen))
+        if getroffen < benoetigt:
+            fehlbedarf += benoetigt - getroffen
+        logger.info("irr_kontrolle Sektor %s: %d von %d gematcht",
+                    sek_name, getroffen, benoetigt)
+    if fehlbedarf:
+        vergeben = set(picked)
+        uebrig = [str(r["ticker"]) for r in rest_rows
+                  if str(r["ticker"]) not in vergeben]
+        picked.extend(rng.sample(uebrig, min(fehlbedarf, len(uebrig))))
+    out["irr_kontrolle"] = [by_t[t] for t in picked]
     logger.info("irr_top: n=%d (Pool %d, Top-N %d, Sektorcap %d); "
-                "irr_kontrolle: n=%d (seed %d)",
-                len(top), len(pool), top_n, max_sek, len(pick), seed)
+                "irr_kontrolle: n=%d sektorgematcht (seed %d); "
+                "irr_pool: n=%d",
+                len(top), len(pool), top_n, max_sek, len(picked), seed,
+                len(out["irr_pool"]))

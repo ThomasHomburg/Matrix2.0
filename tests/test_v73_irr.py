@@ -363,3 +363,114 @@ def test_sector_serialisierung_alt_default_leer():
     d.pop("sector")
     m3 = TickerMetrics.from_dict(d)
     assert m3.sector == ""
+
+
+# ------------------------------------------------- v73b Sektormatching --
+
+def test_irr_kontrolle_sektorgematcht_verteilung():
+    """irr_kontrolle hat je Sektor genauso viele Ticker wie irr_top;
+    disjunkt und mit seed 42 deterministisch."""
+    rows = [_row(f"P{i:02d}", sector=f"Sek{i % 5}", irr=0.05 + i * 0.005)
+            for i in range(31)]
+    cfg = _pool_cfg(min_pool=16, max_ticker=20, max_pro_sektor=4, seed=42)
+    out1 = decisions.koerbe(cfg, rows)
+    out2 = decisions.koerbe(cfg, rows)
+    top = [str(r["ticker"]) for r in out1["irr_top"]]
+    kon = [str(r["ticker"]) for r in out1["irr_kontrolle"]]
+    assert len(top) == 15 and len(kon) == 15
+    top_sekt = [r["sector"] for r in out1["irr_top"]]
+    kon_sekt = [r["sector"] for r in out1["irr_kontrolle"]]
+    assert sorted(top_sekt) == sorted(kon_sekt)     # identische Verteilung
+    assert not (set(top) & set(kon))                # disjunkt zu irr_top
+    assert out1["irr_kontrolle"] == out2["irr_kontrolle"]
+
+
+def test_irr_kontrolle_sektor_erschoepft_auffuellung_log(caplog):
+    """Sektor im Rest erschoepft (beide Ticker im Top) -> Auffuellen aus dem
+    uebrigen Rest + Log 'Sektor X: n von m gematcht'."""
+    import logging
+    rows = [_row("S1", sector="Solo", irr=0.30), _row("S2", sector="Solo", irr=0.29)]
+    rows += [_row(f"P{i:02d}", sector=f"Sek{i % 5}", irr=0.10 - i * 0.001)
+             for i in range(30)]
+    cfg = _pool_cfg(min_pool=16, max_ticker=20, max_pro_sektor=2, seed=42)
+    with caplog.at_level(logging.INFO):
+        out = decisions.koerbe(cfg, rows)
+    top = [str(r["ticker"]) for r in out["irr_top"]]
+    kon = [str(r["ticker"]) for r in out["irr_kontrolle"]]
+    assert "S1" in top and "S2" in top          # Solo komplett im Top
+    # Solo ist im Rest leer -> Kontrolle muss aus anderem Sektor auffuellen
+    assert all(r["sector"] != "Solo" for r in out["irr_kontrolle"])
+    assert len(kon) == len(top)
+    Log_text = " ".join(r.getMessage() for r in caplog.records)
+    assert "Sektor Solo: 0 von 2 gematcht" in Log_text
+
+
+def test_irr_pool_alle_pool_ticker_ohne_top():
+    """irr_pool = alle Pool-Ticker ohne die Top (Basislinie), sortiert."""
+    rows = [_row(f"P{i:02d}", sector=f"Sek{i % 5}", irr=0.05 + i * 0.005)
+            for i in range(31)]
+    cfg = _pool_cfg(min_pool=16, max_ticker=20, max_pro_sektor=4, seed=42)
+    out = decisions.koerbe(cfg, rows)
+    top = {str(r["ticker"]) for r in out["irr_top"]}
+    pool_t = {str(r["ticker"]) for r in rows}     # alle Zeilen sind Pool
+    expected = sorted(pool_t - top)
+    got = [str(r["ticker"]) for r in out["irr_pool"]]
+    assert got == expected
+    assert len(got) == len(pool_t) - len(top)
+
+
+def test_review_kennzahl_median_diff_irr_pool(tmp_path, capsys):
+    """review weist je Korb die Differenz Median zu irr_pool aus; fuer
+    irr_top ist das die Kennzahl 'Differenz Median irr_top vs irr_pool'."""
+    import csv as _csv
+    from argparse import Namespace
+    from datetime import date, timedelta
+
+    rows = [_row(f"P{i:02d}", sector=f"Sek{i % 5}", irr=0.05 + i * 0.005)
+            for i in range(33)]
+    cfg = _pool_cfg(min_pool=16, max_ticker=20, max_pro_sektor=4, seed=42)
+    out = decisions.koerbe(cfg, rows)
+    top = [str(r["ticker"]) for r in out["irr_top"]]
+    rest = [str(r["ticker"]) for r in out["irr_pool"]]
+    cols = ["ticker", "sector", "quality", "status", "status_all", "flags",
+            "dcf_fcff_status", "irr_auto", "mos_rule", "mos_robust",
+            "kurs", "kurs_datum", "iv_bear", "iv_base", "iv_bull"]
+    ranking = tmp_path / "ranking_v73b.csv"
+    with open(ranking, "w", newline="", encoding="utf-8") as f:
+        w = _csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+
+    db = tmp_path / "v73b.db"
+    heute = date.today()
+    d0 = heute - timedelta(days=800)
+    for korb in ("irr_top", "irr_pool"):
+        decisions.cmd_snapshot(Namespace(db=str(db), ranking=str(ranking),
+                                         korb=korb, datum=d0.isoformat(),
+                                         overlap=None, live=None))
+    capsys.readouterr()
+    # Kurse: Top einheitlich +50 %, Rest einheitlich +10 %
+    con = decisions.init_db(db)
+    con.row_factory = sqlite3.Row
+    for r in con.execute("SELECT ticker, kurs FROM decisions WHERE korb <> ''"):
+        t, k0 = r["ticker"], r["kurs"]
+        rend = 0.50 if t in top else 0.10
+        con.execute("INSERT OR REPLACE INTO prices (ticker, datum, kurs, quelle, geladen_am) "
+                    "VALUES (?,?,?,'fixture','x')",
+                    (t, (d0 + timedelta(days=30 * 12)).isoformat(), k0 * (1 + rend)))
+    con.commit()
+    con.close()
+    out_csv = tmp_path / "decisions_review.csv"
+    decisions.cmd_review(Namespace(db=str(db), ranking=None,
+                                   heute=heute.isoformat(), ticker=None,
+                                   out=str(out_csv)))
+    result = list(_csv.DictReader(open(out_csv, newline="", encoding="utf-8")))
+    by = {(r["korb"], int(r["horizont_monate"])): r for r in result}
+    t12 = by[("irr_top", 12)]
+    p12 = by[("irr_pool", 12)]
+    assert int(t12["n"]) == 16 and int(p12["n"]) == 17   # Top-N=min(20, 33//2)
+    assert float(t12["median_pct"]) == pytest.approx(50.0)
+    assert float(p12["median_pct"]) == pytest.approx(10.0)
+    assert float(t12["median_diff_irr_pool_pct"]) == pytest.approx(40.0)
+    assert float(p12["median_diff_irr_pool_pct"]) == pytest.approx(0.0)
