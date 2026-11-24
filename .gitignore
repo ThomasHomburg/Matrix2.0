@@ -19,3 +19,8 @@ logs/
 # v72: SEC-companyfacts-Cache (je CIK) und Zins-Abweichungs-CSV (nur Diagnose)
 logs/sec_cache/
 tools/v72_zins_abweichungen.csv
+
+# v75: Point-in-time-Fundamentalspeicher (DB + Roh-Cache, getrennt von sec_cache)
+data/pit.db
+data/pit.db-journal
+logs/pit_cache/
