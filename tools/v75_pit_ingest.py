@@ -49,6 +49,7 @@ FTS_SUCHE = "https://efts.sec.gov/LATEST/search-index?q={q}&forms=10-K"
 UNIVERSE_JSON = "logs/v75_universe.json"
 STICHPROBE_CSV = "logs/v75_zuordnung_stichprobe.csv"
 KLAERUNG_CSV = "logs/v75_zuordnung_klaerung.csv"
+WIEDER_CSV = "logs/v75_wieder_ticker.csv"
 RATE_LIMIT_S = 0.2  # 5 Anfragen/s gegen data.sec.gov
 
 
@@ -124,37 +125,131 @@ def _browse_edgar_cik(ticker: str):
     return None, None
 
 
-def _fts_cik(firmenname: str):
+def _fts_treffer(abfrage: str, limit_hits: int = 10,
+                 startdt: str = "", enddt: str = ""):
+    """EDGAR Full-Text-Suche; liefert [(display_name, cik10, tickers)].
+    Wichtig: hits[0]['_id'] beginnt mit der ACCSSION-Nummer (deren Praefix
+    ist die CIK des EINREICHENDEN Agenten, NICHT der Firma!) -- deshalb
+    Auswertung von _source.display_names im Format
+    'FIRMENNAME  (TICKER, ...)  (CIK 0001234567)'."""
+    url = FTS_SUCHE.format(q=urllib.parse.quote(abfrage))
+    if startdt and enddt:
+        url += "&dateRange=custom&startdt=%s&enddt=%s" % (startdt, enddt)
+    fts = None
+    for versuch in range(3):
+        try:
+            fts = _get_json(url, timeout=60)
+            break
+        except Exception as e:
+            if versuch == 2:
+                print("  edgar-fts %s: %s" % (abfrage, e))
+            time.sleep(1.5 * (versuch + 1))
+    if fts is None:
+        return []
+    out = []
+    for h in fts.get("hits", {}).get("hits", [])[:limit_hits]:
+        for disp in h.get("_source", {}).get("display_names", []):
+            m = re.search(r"CIK\s*(\d{10})", disp)
+            if not m:
+                continue
+            tickers = re.findall(r"\(([A-Z0-9,\- ]+)\)\s*\(CIK", disp)
+            ticker_liste = []
+            for gruppe in tickers:
+                ticker_liste.extend(x.strip().split() for x in [gruppe.replace(",", " ")])
+            ticker_liste = sorted({t for gruppe in ticker_liste for t in gruppe})
+            name = re.sub(r"\s*\(.*", "", disp).strip()
+            out.append((name, m.group(1), ticker_liste))
+    time.sleep(0.25)
+    return out
+
+
+def _browse_edgar_firmensuche(firmenname: str):
+    """Offizielle EDGAR-Firmensuche (company=...): Liste (name, cik10)."""
+    url = ("https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&"
+           "company=" + urllib.parse.quote(firmenname)
+           + "&type=10-K&dateb=&owner=include&count=40")
     try:
-        fts = _get_json(FTS_SUCHE.format(
-            q=urllib.parse.quote('"%s"' % firmenname)), timeout=60)
-        hits = fts.get("hits", {}).get("hits", [])
-        if hits:
-            return "edgar_fts_name", hits[0]["_id"].split("-")[0].zfill(10)
+        req = urllib.request.Request(
+            url, headers={"User-Agent": user_agent()})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            html = r.read().decode("utf-8", "replace")
     except Exception as e:
-        print("  edgar-fts %s: %s" % (firmenname, e))
-    return None, None
+        print("  firmensuche %s: %s" % (firmenname, e))
+        return []
+    if "No matching" in html:
+        return []
+    out = []
+    for cik, name in re.findall(
+            r'CIK=(\d{10})[^>]*>([^<]+)<', html):
+        if name.strip() and name.strip() != cik:
+            out.append((name.strip(), cik))
+    return out
 
 
-def cik_fuer(ticker: str, firmenname: str, karte: dict):
+def cik_fuer(ticker: str, firmenname: str, karte: dict, ist_aktuell: bool,
+             entfernt_am: str = ""):
     """(konfidenz, quelle, cik10, sec_name). Konfidenz:
-    exakt  = genau ein CIK per Ticker UND SEC-Name passt zum Namen,
-    name   = Treffer ueber Firmennamen/CIK-Suche ohne Namensvorbehalt,
-    unsicher = Rest (geht in die Klaerungsliste, kein Backtest)."""
-    if ticker in karte:
-        sec_name, cik = karte[ticker]
-        if _norm_name(sec_name) == _norm_name(firmenname):
-            return "exakt", "company_tickers", cik, sec_name
-        if not firmenname or _norm_name(firmenname) in _norm_name(sec_name) \
-                or _norm_name(sec_name) in _norm_name(firmenname):
-            return "exakt", "company_tickers", cik, sec_name
-        return "name", "company_tickers_name", cik, sec_name
+    exakt  = aktiver Ticker aus company_tickers ODER FTS-Treffer, bei dem
+             Ticker-Symbol im display_names steht und der Name passt,
+    name   = eindeutiger Treffer ueber FTS-Namensphrase oder EDGAR-Firmensuche,
+    unsicher = Rest (Klaerungsliste, kein Backtest).
+    Fuer historische (Wikipedia-)Ticker -- Reihenfolge gegen Merger-Nachfolge-
+    CIKs und Ticker-Wiederverwendung:
+    (a) FTS exakte Namensphrase, (b) FTS Ticker im Zeitfenster um das
+    Entfernungsdatum (+/-), (c) EDGAR-Firmensuche, (d) Rueckgrat
+    company_tickers (Nachfolge, konfidenz name)."""
+    if ist_aktuell:
+        if ticker in karte:
+            sec_name, cik = karte[ticker]
+            if _norm_name(sec_name) == _norm_name(firmenname) or not firmenname:
+                return "exakt", "company_tickers", cik, sec_name
+            return "name", "company_tickers_name", cik, sec_name
+    else:
+        startdt, enddt = "", ""
+        if entfernt_am:
+            try:
+                jahr = int(entfernt_am[:4])
+                startdt = "%d-01-01" % (jahr - 4)
+                enddt = "%d-12-31" % (jahr + 1)
+            except ValueError:
+                pass
+        # (a) FTS exakte Namensphrase
+        if firmenname:
+            kandidaten = {}
+            for name, cik, tickers in _fts_treffer('"%s"' % firmenname,
+                                                   startdt=startdt,
+                                                   enddt=enddt):
+                if (_norm_name(name) == _norm_name(firmenname)
+                        or _norm_name(firmenname) in _norm_name(name)):
+                    kandidaten[cik] = name
+            if len(kandidaten) == 1:
+                cik, name = next(iter(kandidaten.items()))
+                return "exakt" if firmenname.lower() in name.lower() \
+                    else "name", "edgar_fts_name", cik, name
+        # (b) FTS Ticker im Zeitfenster, display-ticker-Match bevorzugt
+        treffer = _fts_treffer(ticker, startdt=startdt, enddt=enddt)
+        mit_ticker = sorted({(name, cik) for name, cik, tickers in treffer
+                             if ticker in tickers})
+        if len(mit_ticker) == 1:
+            name, cik = mit_ticker[0]
+            return "exakt", "edgar_fts_ticker", cik, name
+        # (c) EDGAR-Firmensuche (offizielle company-Liste)
+        if firmenname:
+            beste = {}
+            for name, cik in _browse_edgar_firmensuche(firmenname):
+                if _norm_name(firmenname) in _norm_name(name) \
+                        or _norm_name(name).startswith(_norm_name(firmenname)):
+                    beste[cik] = name
+            if len(beste) == 1:
+                cik, name = next(iter(beste.items()))
+                return "name", "edgar_firmensuche", cik, name
+        # (d) Rueckgrat company_tickers (Nachfolge-Firma)
+        if ticker in karte:
+            sec_name, cik = karte[ticker]
+            return "name", "company_tickers_name", cik, sec_name
     quelle, cik = _browse_edgar_cik(ticker)
     if cik:
         return "name", quelle, cik, ""
-    quelle, cik = _fts_cik(firmenname)
-    if cik:
-        return "name", quelle or "edgar_fts_name", cik, ""
     return "unsicher", "kein_cik", None, ""
 
 
@@ -171,29 +266,45 @@ def baue_universe(stichprobe_n: int = 30) -> dict:
     gesehene = {}
     for e in eintraege:
         gesehene.setdefault(e["ticker"], e)
+    eingefuegt = {}
     for z in _wiki_zeilen():
         t = (z.get("removed") or "").upper().strip()
         n = z.get("removed_name") or ""
+        at = (z.get("added") or "").upper().strip()
+        an = z.get("added_name") or ""
+        d = z["datum"].isoformat()
+        if re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,5}", at or ""):
+            if at not in eingefuegt or eingefuegt[at]["von"] > d:
+                eingefuegt[at] = {"von": d, "name": an}
         if re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,5}", t or ""):
             if t in gesehene:
                 # Ticker ist heute wieder drin: historische Zeile
-                gesehene[t]["historisch_removed"] = z["datum"].isoformat()
+                gesehene[t]["historisch_removed"] = d
                 gesehene[t]["historisch_name"] = n
             else:
                 gesehene[t] = {"ticker": t, "name": n,
                                "index_quelle": "wikipedia",
-                               "removed_am": z["datum"].isoformat()}
+                               "removed_am": d}
     tickers = sorted(gesehene)
     print("Universe-Ticker gesamt: %d" % len(tickers))
     karte = cik_karte()
     ergebnisse = []
     for t in tickers:
         e = gesehene[t]
-        konf, quelle, cik, sec_name = cik_fuer(t, e.get("name", ""), karte)
+        konf, quelle, cik, sec_name = cik_fuer(
+            t, e.get("name", ""), karte,
+            ist_aktuell=(e["index_quelle"] == "sp500_aktuell"),
+            entfernt_am=e.get("removed_am", ""))
+        cik_aktuell = karte.get(t, ("", ""))[1] if t in karte \
+            else None
         ergebnisse.append({"ticker": t, "name": e.get("name", ""),
                            "cik10": cik, "konfidenz": konf,
                            "quelle": quelle, "sec_name": sec_name,
-                           "index_quelle": e["index_quelle"]})
+                           "index_quelle": e["index_quelle"],
+                           "cik_wiederverwendung": (
+                               cik_aktuell if (cik_aktuell and cik
+                                               and cik_aktuell != cik)
+                               else None)})
     klaerung = [z for z in ergebnisse if z["konfidenz"] == "unsicher"]
     with open(UNIVERSE_JSON, "w", encoding="utf-8") as fh:
         json.dump({"tickers": ergebnisse}, fh, ensure_ascii=True, indent=1)
@@ -216,6 +327,41 @@ def baue_universe(stichprobe_n: int = 30) -> dict:
              sum(1 for z in ergebnisse if z["konfidenz"] == "unsicher")))
     print("Stichprobe: %s | Klaerung: %s (%d Zeilen)"
           % (STICHPROBE_CSV, KLAERUNG_CSV, len(klaerung)))
+    # pit_member: Add/Remove-Ereignisse aus Wikipedia + aktuellem Index
+    # und Wieder-Ticker-CSV (gleicher Ticker -> 2 CIK, von/bis).
+    con = sqlite3.connect(PIT_DB_PFAD)
+    ensure_schema(con)
+    con.execute("DELETE FROM pit_member")
+    by_ticker = {}
+    for z in ergebnisse:
+        by_ticker.setdefault(z["ticker"], []).append(z)
+    for tt, gruppe in sorted(by_ticker.items()):
+        ciks = sorted({z["cik10"] for z in gruppe if z.get("cik10")})
+        if len(ciks) > 1:
+            print("Wieder-Ticker %s: CIKs %s" % (tt, ciks))
+        for z in gruppe:
+            if not z.get("cik10"):
+                continue
+            von = eingefuegt.get(tt, {}).get("von", "")
+            bis = z.get("removed_am", "")
+            con.execute(
+                "INSERT OR IGNORE INTO pit_member VALUES (?,?,?,?,?,?)",
+                (z["cik10"], tt, von or "2000-01-01", bis or None,
+                 z["index_quelle"], z["konfidenz"]))
+    con.commit()
+    con.close()
+    with open(WIEDER_CSV, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["ticker", "cik10_liste", "konfidenz_liste"])
+        for tt, gruppe in sorted(by_ticker.items()):
+            ciks = sorted({z["cik10"] for z in gruppe if z.get("cik10")})
+            wieder = [z.get("cik_wiederverwendung") for z in gruppe
+                      if z.get("cik_wiederverwendung")]
+            alle = sorted(set(ciks) | set(wieder))
+            if len(alle) > 1:
+                w.writerow([tt, ";".join(alle),
+                           ";".join(z["konfidenz"] for z in gruppe
+                                    if z.get("cik10"))])
     return {"tickers": ergebnisse}
 
 
@@ -316,7 +462,8 @@ def verarbeite_cik(con: sqlite3.Connection, cik10: str, quelle: str,
     """Laedt companyfacts fuer einen CIK (Cache vor Ort), schreibt das
     Aenderungsprotokoll, ergaenzt pit_entity (submissions) und vermerkt den
     Lauf in ingest_runs (Resume). Roh-JSON wird nach Erfolg geloescht,
-    ausser bei keep_raw."""
+    ausser bei keep_raw. Fehler werden je CIK abgefangen (kein Abbruch des
+    Batches, kein ingest_runs-Eintrag -> Retry beim naechsten Lauf)."""
     os.makedirs(CACHE_DIR, exist_ok=True)
     pfad = os.path.join(CACHE_DIR, "CIK%s.json" % cik10)
     bereits = con.execute(
@@ -332,13 +479,17 @@ def verarbeite_cik(con: sqlite3.Connection, cik10: str, quelle: str,
         von_cache = True
     if payload is None:
         time.sleep(RATE_LIMIT_S)
-        payload = _get_json(COMPANYFACTS.format(cik10=cik10))
-        with open(pfad, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh)
+        try:
+            payload = _get_json(COMPANYFACTS.format(cik10=cik10))
+            with open(pfad, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+        except Exception as e:
+            return {"status": "fehler:%s" % type(e).__name__, "neu": 0,
+                    "grund": str(e)[:120]}
     fakten, verworfen = facts_aus_companyfacts(payload, cik10)
     con.execute("BEGIN")
     neu = schreibe_aenderungsprotokoll(con, fakten)
-    # pit_entity aus submissions (SIC, Zeitr'aume, aktueller Ticker)
+    # pit_entity aus submissions (SIC, Zeitraeume, aktueller Ticker)
     time.sleep(RATE_LIMIT_S)
     try:
         subs = _get_json(SUBMISSIONS.format(cik10=cik10))
@@ -412,15 +563,25 @@ def main() -> int:
           % (len(offene), len(offene) * 5.0 / 60.0))
     t0 = time.time()
     letzter = ""
+    fehler = []
+    fertig = 0
     for z in offene:
         letzter = z["cik10"]
         info = verarbeite_cik(con, z["cik10"], z["ticker"],
                               keep_raw=args.keep_raw)
         print("  %s (%s): %s" % (z["cik10"], z["ticker"], info["status"]))
         if info["status"] == "ok":
+            fertig += 1
             print("    neu=%d fakten=%s verworfen=%s rss_max=%.0f MB"
                   % (info["neu"], info["fakten"], info["verworfen"],
                      _rss_max_mb()))
+        elif info["status"].startswith("fehler"):
+            fehler.append((z["ticker"], info.get("grund", "")))
+    if fehler:
+        print("Fehler je CIK (%d), werden beim naechsten Lauf erneut "
+              "versucht:" % len(fehler))
+        for t, g in fehler:
+            print("  %s: %s" % (t, g))
     dauer = time.time() - t0
     zeilen = con.execute("SELECT COUNT(*) FROM pit_facts").fetchone()[0]
     groesse = os.path.getsize(args.db) / 1e6
